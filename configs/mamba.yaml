@@ -1,0 +1,32 @@
+model_name: mamba
+enabled: true
+
+feature_frame_path: data/processed/xgboost/features_weather_context_w14_h3.parquet
+artifact_dir: artifacts/mamba_weather_context_w14_h3_smallbatch
+
+split_column: split
+
+device: cpu
+loss_name: mse
+
+batch_size: 1024
+eval_batch_size: 2048
+max_epochs: 3
+early_stopping_patience: 2
+checkpoint_interval: 5
+
+learning_rate: 0.0007
+weight_decay: 0.0001
+lr_patience: 2
+lr_decay_factor: 0.5
+gradient_clip_norm: 1.0
+
+embedding_dim: 16
+model_dim: 32
+num_blocks: 2
+expand_factor: 2
+kernel_size: 3
+head_hidden_dim: 64
+dropout: 0.1
+
+seed: 42

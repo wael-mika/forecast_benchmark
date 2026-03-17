@@ -1,0 +1,31 @@
+model_name: xlstm
+enabled: true
+
+feature_frame_path: data/processed/xgboost/features_weather_context_w14_h3.parquet
+artifact_dir: artifacts/xlstm_weather_context_w14_h3
+
+split_column: split
+
+device: auto
+loss_name: mse
+
+batch_size: 4096
+eval_batch_size: 8192
+max_epochs: 18
+early_stopping_patience: 5
+checkpoint_interval: 5
+
+learning_rate: 0.0007
+weight_decay: 0.0001
+lr_patience: 2
+lr_decay_factor: 0.5
+gradient_clip_norm: 1.0
+
+embedding_dim: 16
+model_dim: 64
+hidden_size: 64
+num_blocks: 3
+head_hidden_dim: 128
+dropout: 0.1
+
+seed: 42

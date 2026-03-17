@@ -1,0 +1,32 @@
+model_name: lstm
+enabled: true
+
+feature_frame_path: data/processed/xgboost/features_w5_h3.parquet
+artifact_dir: artifacts/lstm_w5_h3_simple
+
+split_column: split
+
+device: auto
+loss_name: smooth_l1
+smooth_l1_beta: 1.0
+
+batch_size: 4096
+eval_batch_size: 8192
+max_epochs: 15
+early_stopping_patience: 5
+checkpoint_interval: 5
+
+learning_rate: 0.001
+weight_decay: 0.0001
+lr_patience: 2
+lr_decay_factor: 0.5
+gradient_clip_norm: 1.0
+
+embedding_dim: 8
+hidden_size: 32
+num_layers: 2
+head_hidden_dim: 64
+bidirectional: true
+dropout: 0.1
+
+seed: 42

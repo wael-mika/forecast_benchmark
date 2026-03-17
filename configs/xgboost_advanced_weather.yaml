@@ -1,0 +1,73 @@
+model_name: xgboost
+enabled: true
+
+canonical_data_path: data/processed/discharge_daily.parquet
+reanalysis_data_path: data/processed/reanalysis_daily.parquet
+feature_frame_path: data/processed/xgboost/features_weather_plus_w14_h3.parquet
+artifact_dir: artifacts/advanced/xgboost_weather_w14_h3
+
+window_size: 14
+horizons: [1, 2, 3]
+include_current_observation: true
+include_window_stats: true
+include_window_deltas: true
+
+use_reanalysis_features: true
+reanalysis_variables:
+  - era5_precipitation_sum
+  - era5_rain_sum
+  - era5_snowfall_sum
+  - era5_temperature_2m_mean
+  - era5_temperature_2m_max
+  - era5_temperature_2m_min
+  - era5_precipitation_hours
+reanalysis_lags: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+reanalysis_windows: [3, 7, 14]
+include_future_reanalysis: true
+
+use_flow_context: true
+flow_context_station_ids:
+  - 6142150
+  - 6142200
+  - 6142520
+  - 6142551
+  - 6142601
+  - 6142620
+  - 6142640
+  - 6142650
+  - 6142660
+  - 6142680
+  - 6144100
+  - 6144150
+  - 6144200
+  - 6144300
+  - 6144350
+  - 6144400
+  - 6158100
+flow_context_lags: [0, 1]
+
+split_column: split
+use_station_id_as_feature: true
+
+train_fraction: 0.7
+validation_fraction: 0.15
+
+objective: reg:squarederror
+eval_metric: [rmse, mae]
+early_stopping_metric: rmse
+
+num_boost_round: 1000
+early_stopping_rounds: 120
+checkpoint_interval: 50
+verbose_eval: 50
+
+tree_method: hist
+learning_rate: 0.03
+max_depth: 6
+min_child_weight: 1.5
+subsample: 0.9
+colsample_bytree: 0.7
+reg_lambda: 1.5
+reg_alpha: 0.0
+seed: 42
+verbosity: 1

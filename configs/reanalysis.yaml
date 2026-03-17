@@ -1,0 +1,8 @@
+canonical_data_path: data/processed/discharge_daily.parquet
+station_metadata_path: data/raw/Data_slovakia/stationbasins.geojson
+
+min_start_date: 1984-01-01
+
+raw_output_dir: data/raw/reanalysis_open_meteo
+processed_output_path: data/processed/reanalysis_daily.parquet
+metadata_output_path: data/processed/reanalysis_station_metadata.csv

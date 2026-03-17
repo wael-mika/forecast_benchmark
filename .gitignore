@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+.matplotlib/
+.coverage
+htmlcov/
+
+# Virtual environment — recreate with requirements.txt on each machine
+.venv/
+venv/
+
+# Generated data / model artifacts — too large to transfer via git
+data/
+artifacts/
+logs/
+plots/

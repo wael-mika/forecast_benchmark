@@ -1,0 +1,35 @@
+# Milestone 1 data ingestion configuration.
+raw_data_dir: data/raw
+processed_data_path: data/processed/discharge_daily.parquet
+raw_file_patterns:
+  - "**/*_Q_Day*.txt"
+
+# Column matching is case-insensitive and ignores punctuation.
+date_column_candidates:
+  - YYYY-MM-DD
+  - yyyymmdd
+  - date
+  - ds
+  - datetime
+  - time
+  - day
+
+value_column_candidates:
+  - discharge
+  - q
+  - flow
+  - value
+  - y
+
+station_id_column_candidates:
+  - station_id
+  - station
+  - grdc_no
+  - grdc_number
+  - id
+  - unique_id
+
+# Placeholders for later milestones.
+min_station_length: 365
+context_length: 30
+horizon: 7

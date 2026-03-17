@@ -1,0 +1,31 @@
+# ── Core scientific stack ────────────────────────────────────────────────────
+numpy==2.4.3
+pandas==3.0.1
+scipy==1.17.1
+pyarrow==23.0.1
+
+# ── Machine learning ─────────────────────────────────────────────────────────
+xgboost==3.2.0
+
+# ── PyTorch — install separately with the right variant for your platform:
+#
+#   Apple Silicon (MPS):
+#     pip install torch==2.10.0
+#
+#   Linux / Windows with CUDA 12.x:
+#     pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu121
+#
+#   CPU-only fallback:
+#     pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# torch==2.10.0  ← uncomment if your platform uses the default PyPI wheel
+
+# ── Plotting ─────────────────────────────────────────────────────────────────
+matplotlib==3.10.8
+pillow==12.1.1
+
+# ── Config / IO ──────────────────────────────────────────────────────────────
+PyYAML==6.0.3
+
+# ── Dev / testing ────────────────────────────────────────────────────────────
+pytest==9.0.2
