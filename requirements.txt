@@ -9,14 +9,20 @@ xgboost==3.2.0
 
 # ── PyTorch — install separately with the right variant for your platform:
 #
+#   Windows / Linux with CUDA 12.6 (RTX 2060 SUPER, driver >= 560):
+#     pip install torch==2.10.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+#
+#   Windows / Linux with CUDA 12.1-12.4:
+#     pip install torch==2.10.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+#
 #   Apple Silicon (MPS):
 #     pip install torch==2.10.0
 #
-#   Linux / Windows with CUDA 12.x:
-#     pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu121
-#
 #   CPU-only fallback:
 #     pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# IMPORTANT: always install torch BEFORE running `pip install -e .` or the editable
+# install will pull the CPU-only wheel from PyPI and override your CUDA build.
 #
 # torch==2.10.0  ← uncomment if your platform uses the default PyPI wheel
 

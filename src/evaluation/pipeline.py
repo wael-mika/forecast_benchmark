@@ -1,4 +1,23 @@
-"""Evaluation pipeline helpers for benchmark experiments."""
+"""Evaluation pipeline helpers that turn raw model outputs into saved artifacts.
+
+This module sits between model inference and the final evaluation files. It
+builds long-form prediction tables, attaches train-based scaling references
+for MASE and RMSSE, computes split-level and station-level summaries, and
+writes the results to each experiment directory.
+
+Main helpers
+------------
+build_prediction_frame
+    Attach single-output predictions to the base feature frame.
+build_direct_prediction_frame
+    Convert direct multi-horizon predictions from wide format to long format.
+evaluate_prediction_frame
+    Score a standard prediction frame and return overall plus per-station metrics.
+evaluate_direct_prediction_frame
+    Score a direct multi-horizon prediction frame by split and horizon.
+save_evaluation_outputs
+    Save predictions, metric tables, and a small manifest to disk.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +37,7 @@ def build_prediction_frame(
     actual_column: str = "target",
     split_column: str = "split",
 ) -> pd.DataFrame:
-    """Attach model predictions to the supervised feature frame."""
+    """Attach one predicted value per row to the supervised feature frame."""
     prediction_df = feature_df.loc[:, ["unique_id", "forecast_origin_ds", "target_ds", split_column, actual_column]].copy()
     prediction_df = prediction_df.rename(columns={actual_column: "y_true"})
     prediction_df["y_pred"] = predictions
@@ -33,7 +52,7 @@ def evaluate_prediction_frame(
     group_column: str = "unique_id",
     scale_reference_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Evaluate predictions with both overall and per-station summaries."""
+    """Score a standard prediction frame and return overall plus per-station summaries."""
     if scale_reference_df is None:
         train_reference = prediction_df.loc[prediction_df[split_column] == "train", [group_column, "target_ds", "y_true"]]
         scale_reference = build_scale_reference(
@@ -62,7 +81,7 @@ def save_evaluation_outputs(
     *,
     artifact_dir: Path,
 ) -> None:
-    """Persist predictions and metric tables to the experiment artifact directory."""
+    """Save predictions, summary tables, and a manifest into one artifact directory."""
     save_parquet(prediction_df, artifact_dir / "predictions.parquet")
     save_csv(overall_metrics_df, artifact_dir / "metrics_summary.csv")
     save_csv(per_station_metrics_df, artifact_dir / "metrics_by_station.csv")
@@ -81,7 +100,7 @@ def build_direct_prediction_frame(
     *,
     split_column: str = "split",
 ) -> pd.DataFrame:
-    """Convert wide multi-horizon direct predictions into a long evaluation table."""
+    """Convert wide direct predictions into one long table with one row per horizon."""
     prediction_frames: list[pd.DataFrame] = []
     prediction_columns = sorted(
         [column for column in prediction_columns_df.columns if column.startswith("prediction_h")],
@@ -115,7 +134,7 @@ def evaluate_direct_prediction_frame(
     group_column: str = "unique_id",
     scale_reference_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Evaluate direct multi-horizon predictions by split and horizon."""
+    """Score direct multi-horizon predictions separately for each split and horizon."""
     if scale_reference_df is None:
         train_reference = (
             prediction_df.loc[prediction_df[split_column] == "train", [group_column, "target_ds", "y_true"]]

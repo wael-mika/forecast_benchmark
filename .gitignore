@@ -10,8 +10,16 @@ htmlcov/
 .venv/
 venv/
 
-# Generated data / model artifacts — too large to transfer via git
-data/
-artifacts/
-logs/
-plots/
+# Model checkpoints — too large for git
+**/*.pt
+**/*.ckpt
+
+# Raw and heavy processed data — too large or reproducible via scripts
+data/raw/
+data/processed/xgboost/
+
+# Scratch outputs
+tmp/
+
+# Build metadata
+src/*.egg-info/

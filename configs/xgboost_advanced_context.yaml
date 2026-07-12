@@ -5,7 +5,7 @@ canonical_data_path: data/processed/discharge_daily.parquet
 feature_frame_path: data/processed/xgboost/features_context_w14_h3.parquet
 artifact_dir: artifacts/advanced/xgboost_context_w14_h3
 
-window_size: 14
+window_size: 30
 horizons: [1, 2, 3]
 include_current_observation: true
 include_window_stats: true

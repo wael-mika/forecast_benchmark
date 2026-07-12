@@ -1,4 +1,26 @@
-"""Compare advanced model results within the matched context and weather regimes."""
+"""Generate cross-model comparison plots for the advanced benchmark suite.
+
+This script collects metrics from completed advanced-model artifact directories,
+combines them by regime, and calls the shared comparison plot bundle builder.
+It produces one comparison folder for context runs and one for weather runs.
+
+Use this script after several advanced model runs have completed and you want a
+side-by-side comparison across architectures.
+
+Inputs
+------
+    metrics_summary.csv from the configured artifact directories in CONFIG_MAP
+
+Outputs
+-------
+    artifacts/advanced_seq/model_comparison_context/
+    artifacts/advanced_seq/model_comparison_weather/
+
+Usage
+-----
+    .venv/Scripts/python scripts/compare_advanced_results.py
+    .venv/Scripts/python scripts/compare_advanced_results.py ann patchtst tft
+"""
 
 from __future__ import annotations
 
@@ -28,6 +50,7 @@ CONFIG_MAP = {
         "xlstm": PROJECT_ROOT / "configs" / "xlstm_advanced_context.yaml",
         "mamba": PROJECT_ROOT / "configs" / "mamba_advanced_context.yaml",
         "hybrid": PROJECT_ROOT / "configs" / "hybrid_context.yaml",
+        "flownet": PROJECT_ROOT / "configs" / "flownet_context.yaml",
     },
     "weather": {
         "xgboost": PROJECT_ROOT / "configs" / "xgboost_advanced_weather.yaml",
@@ -39,6 +62,7 @@ CONFIG_MAP = {
         "xlstm": PROJECT_ROOT / "configs" / "xlstm_advanced_weather.yaml",
         "mamba": PROJECT_ROOT / "configs" / "mamba_advanced_weather.yaml",
         "hybrid": PROJECT_ROOT / "configs" / "hybrid_weather.yaml",
+        "flownet": PROJECT_ROOT / "configs" / "flownet_weather.yaml",
     },
 }
 
@@ -73,7 +97,7 @@ def _load_metrics(artifact_map: dict[str, Path]) -> tuple[pd.DataFrame, list[str
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Generate model-comparison plots for the context-only and weather regimes."""
+    """Build comparison tables and plots for the requested advanced models."""
     active_argv = argv or sys.argv
     logger = get_logger("compare_advanced_results")
     requested_models = active_argv[1:]

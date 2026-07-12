@@ -1,4 +1,19 @@
-"""Plotting helpers for benchmark experiment artifacts."""
+"""Plot builders for evaluation artifacts produced during training and analysis.
+
+This module creates the figures saved under each experiment directory. It
+supports three main workflows: rebuilding XGBoost round-by-round diagnostics,
+plotting single-run training and evaluation summaries, and collecting small
+comparison bundles across models.
+
+Main groups
+-----------
+Round-history helpers
+    Recompute split metrics for each saved XGBoost boosting round.
+Single-run plots
+    Metric curves, heatmaps, residual checks, feature importance, and examples.
+Bundle generators
+    Collect the standard plots for one artifact directory and write a manifest.
+"""
 
 from __future__ import annotations
 
@@ -30,7 +45,7 @@ PRIMARY_METRICS = ("rmse", "mae", "mape", "smape", "mase", "rmsse")
 
 
 def load_json(path: Path) -> dict:
-    """Load a JSON object from disk."""
+    """Load one JSON object from disk and validate that it is a dictionary."""
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, dict):
@@ -39,6 +54,7 @@ def load_json(path: Path) -> dict:
 
 
 def _require_xgboost():
+    """Import XGBoost lazily so plotting code can still load without it installed."""
     try:
         import xgboost as xgb  # type: ignore
     except ImportError as exc:  # pragma: no cover - depends on local environment
@@ -47,7 +63,7 @@ def _require_xgboost():
 
 
 def discover_round_model_paths(artifact_dir: Path, final_round: int) -> list[tuple[int, Path]]:
-    """Discover saved checkpoint models for each boosting round."""
+    """Collect the saved XGBoost model file for each available boosting round."""
     round_paths: dict[int, Path] = {}
     checkpoint_dir = artifact_dir / "checkpoints"
     if checkpoint_dir.exists():
@@ -70,7 +86,7 @@ def discover_round_model_paths(artifact_dir: Path, final_round: int) -> list[tup
 
 
 def load_booster(model_path: Path):
-    """Load a saved XGBoost booster from disk."""
+    """Load one saved XGBoost booster from disk."""
     xgb = _require_xgboost()
     booster = xgb.Booster()
     booster.load_model(str(model_path))
@@ -85,7 +101,7 @@ def build_round_metric_history(
     target_column: str = "target",
     split_column: str = "split",
 ) -> pd.DataFrame:
-    """Recompute split-level metrics for each saved boosting round."""
+    """Recompute split metrics for every saved boosting round of one XGBoost run."""
     training_summary = load_json(artifact_dir / "training_summary.json")
     final_round = int(training_summary["trained_num_boost_round"])
     enable_categorical = "station_id_feature" in set(feature_columns)
@@ -129,7 +145,7 @@ def build_direct_round_metric_history(
     feature_columns: Iterable[str],
     split_column: str = "split",
 ) -> pd.DataFrame:
-    """Recompute split-level metrics by round for each direct forecast horizon."""
+    """Recompute round-by-round metrics for each horizon of a direct XGBoost run."""
     training_summary = load_json(artifact_dir / "training_summary.json")
     target_columns = training_summary.get("target_columns") or infer_direct_target_columns(feature_df)
     enable_categorical = "station_id_feature" in set(feature_columns)
@@ -179,6 +195,7 @@ def build_direct_round_metric_history(
 
 
 def _prepare_curve_frame(round_metrics_df: pd.DataFrame, aggregation: str = "micro") -> pd.DataFrame:
+    """Select one aggregation level and sort the rows for plotting."""
     curve_df = round_metrics_df.loc[round_metrics_df["aggregation"] == aggregation].copy()
     if curve_df.empty:
         raise ValueError(f"No rows found for aggregation={aggregation!r}.")
@@ -186,10 +203,67 @@ def _prepare_curve_frame(round_metrics_df: pd.DataFrame, aggregation: str = "mic
 
 
 def _new_figure_grid(metric_count: int, columns: int = 3) -> tuple[plt.Figure, np.ndarray]:
+    """Create a simple subplot grid sized to the number of requested metrics."""
     rows = math.ceil(metric_count / columns)
     figure, axes = plt.subplots(rows, columns, figsize=(columns * 5.2, rows * 3.8), constrained_layout=True)
     axes_array = np.atleast_1d(axes).reshape(rows, columns)
     return figure, axes_array
+
+
+def _residual_plot_range(residuals: pd.Series | np.ndarray, quantile_bounds: tuple[float, float] = (0.01, 0.99)) -> tuple[float, float]:
+    """Choose a robust x-axis range so a few extreme residuals do not flatten the histogram."""
+    values = np.asarray(residuals, dtype=float)
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return -1.0, 1.0
+
+    lower = float(np.quantile(finite_values, quantile_bounds[0]))
+    upper = float(np.quantile(finite_values, quantile_bounds[1]))
+    if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+        lower = float(np.min(finite_values))
+        upper = float(np.max(finite_values))
+
+    spread = upper - lower
+    if spread <= 1e-9:
+        padding = max(abs(lower), 1.0) * 0.1
+    else:
+        padding = spread * 0.08
+    return lower - padding, upper + padding
+
+
+def _plot_clipped_residual_histogram(
+    axis: plt.Axes,
+    residuals: pd.Series | np.ndarray,
+    *,
+    bins: int,
+    quantile_bounds: tuple[float, float] = (0.01, 0.99),
+) -> None:
+    """Plot a residual histogram using a clipped robust range and annotate the outlier share."""
+    values = np.asarray(residuals, dtype=float)
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        raise ValueError("Residual plots require at least one finite residual.")
+
+    lower, upper = _residual_plot_range(finite_values, quantile_bounds=quantile_bounds)
+    clipped_values = np.clip(finite_values, lower, upper)
+    outlier_fraction = float(np.mean((finite_values < lower) | (finite_values > upper)))
+
+    axis.hist(clipped_values, bins=np.linspace(lower, upper, bins + 1), color="#ff7f0e", alpha=0.85)
+    axis.axvline(0.0, color="#111111", linestyle="--", linewidth=1.3)
+    axis.set_xlim(lower, upper)
+    axis.grid(True, axis="y", alpha=0.25)
+
+    if outlier_fraction > 0.0:
+        axis.text(
+            0.98,
+            0.96,
+            f"x-axis clipped to 1-99 pct; edge bins include {outlier_fraction:.1%} outliers",
+            transform=axis.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8,
+            bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 2.5},
+        )
 
 
 def plot_metric_curves(
@@ -346,12 +420,10 @@ def plot_residual_distribution(
         raise ValueError(f"No prediction rows found for split={split!r}.")
 
     figure, axis = plt.subplots(figsize=(7.0, 4.5), constrained_layout=True)
-    axis.hist(split_df["residual"], bins=bins, color="#ff7f0e", alpha=0.85)
-    axis.axvline(0.0, color="#111111", linestyle="--", linewidth=1.5)
+    _plot_clipped_residual_histogram(axis, split_df["residual"], bins=bins)
     axis.set_xlabel("Residual (Prediction - Actual)")
     axis.set_ylabel("Count")
     axis.set_title(f"{title} ({split.title()})")
-    axis.grid(True, axis="y", alpha=0.25)
 
     ensure_parent_dir(output_path)
     figure.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -659,12 +731,10 @@ def plot_direct_residual_distribution(
 
     for axis, horizon in zip(axes_array, horizons):
         horizon_df = split_df.loc[split_df["horizon"] == horizon]
-        axis.hist(horizon_df["residual"], bins=bins, color="#ff7f0e", alpha=0.85)
-        axis.axvline(0.0, color="#111111", linestyle="--", linewidth=1.3)
+        _plot_clipped_residual_histogram(axis, horizon_df["residual"], bins=bins)
         axis.set_title(f"H{int(horizon)}")
-        axis.set_xlabel("Residual")
+        axis.set_xlabel("Residual (Prediction - Actual)")
         axis.set_ylabel("Count")
-        axis.grid(True, axis="y", alpha=0.25)
 
     figure.suptitle(f"{title} ({split.title()})", fontsize=16)
     ensure_parent_dir(output_path)
@@ -917,7 +987,9 @@ def plot_epoch_metric_curves(
     if filtered.empty:
         raise ValueError(f"No rows found for aggregation={aggregation!r}.")
 
-    metric_names = [metric for metric in metrics if metric in filtered.columns]
+    metric_names = [metric for metric in metrics if metric in filtered.columns and filtered[metric].notna().any()]
+    if not metric_names:
+        raise ValueError("No metric columns with finite values were found in epoch_metrics_df.")
     figure, axes = _new_figure_grid(len(metric_names))
     color_map = {"validation": "#ff7f0e", "test": "#2ca02c"}
 
@@ -926,7 +998,9 @@ def plot_epoch_metric_curves(
             split_df = filtered.loc[filtered["split"] == split_name]
             if split_df.empty:
                 continue
-            averaged = split_df.groupby("epoch", dropna=False)[metric_name].mean().reset_index()
+            averaged = split_df.groupby("epoch", dropna=False)[metric_name].mean().reset_index().dropna(subset=[metric_name])
+            if averaged.empty:
+                continue
             axis.plot(
                 averaged["epoch"],
                 averaged[metric_name],
@@ -1052,7 +1126,7 @@ def generate_xgboost_plot_bundle(
     target_column: str = "target",
     split_column: str = "split",
 ) -> dict[str, str]:
-    """Generate round-by-round and summary plots for one XGBoost artifact directory."""
+    """Build the standard XGBoost plot bundle and return the saved-file manifest."""
     training_summary = load_json(artifact_dir / "training_summary.json")
     if "per_horizon" in training_summary:
         plot_dir = artifact_dir / "plots"
@@ -1067,7 +1141,6 @@ def generate_xgboost_plot_bundle(
         save_csv(round_metrics_df, plot_dir / "round_metrics.csv")
 
         metrics_summary_df = pd.read_csv(artifact_dir / "metrics_summary.csv")
-        per_station_metrics_df = pd.read_csv(artifact_dir / "metrics_by_station.csv")
         prediction_df = pd.read_parquet(artifact_dir / "predictions.parquet")
 
         feature_importance_by_horizon = {
@@ -1118,10 +1191,6 @@ def generate_xgboost_plot_bundle(
             prediction_df,
             output_path=plot_dir / "test_residual_distribution.png",
         )
-        plot_direct_station_metric_bars(
-            per_station_metrics_df,
-            output_path=plot_dir / "test_worst_station_rmse.png",
-        )
         plot_direct_station_examples(
             prediction_df,
             output_path=plot_dir / "test_station_examples.png",
@@ -1140,7 +1209,6 @@ def generate_xgboost_plot_bundle(
             "test_metric_bars": str(plot_dir / "test_metric_bars.png"),
             "test_actual_vs_predicted": str(plot_dir / "test_actual_vs_predicted.png"),
             "test_residual_distribution": str(plot_dir / "test_residual_distribution.png"),
-            "test_worst_station_rmse": str(plot_dir / "test_worst_station_rmse.png"),
             "test_station_examples": str(plot_dir / "test_station_examples.png"),
             "test_forecast_windows": str(plot_dir / "test_forecast_windows.png"),
         }
@@ -1162,7 +1230,6 @@ def generate_xgboost_plot_bundle(
     save_csv(round_metrics_df, plot_dir / "round_metrics.csv")
 
     metrics_summary_df = pd.read_csv(artifact_dir / "metrics_summary.csv")
-    per_station_metrics_df = pd.read_csv(artifact_dir / "metrics_by_station.csv")
     prediction_df = pd.read_parquet(artifact_dir / "predictions.parquet")
     feature_importance_df = pd.read_csv(artifact_dir / "feature_importance.csv")
 
@@ -1193,10 +1260,6 @@ def generate_xgboost_plot_bundle(
         prediction_df,
         output_path=plot_dir / "test_residual_distribution.png",
     )
-    plot_station_metric_bars(
-        per_station_metrics_df,
-        output_path=plot_dir / "test_worst_station_rmse.png",
-    )
     plot_station_examples(
         prediction_df,
         output_path=plot_dir / "test_station_examples.png",
@@ -1210,7 +1273,6 @@ def generate_xgboost_plot_bundle(
         "feature_importance_top15": str(plot_dir / "feature_importance_top15.png"),
         "test_actual_vs_predicted": str(plot_dir / "test_actual_vs_predicted.png"),
         "test_residual_distribution": str(plot_dir / "test_residual_distribution.png"),
-        "test_worst_station_rmse": str(plot_dir / "test_worst_station_rmse.png"),
         "test_station_examples": str(plot_dir / "test_station_examples.png"),
     }
     save_json(manifest, plot_dir / "plot_manifest.json")
@@ -1222,14 +1284,13 @@ def generate_neural_plot_bundle(
     artifact_dir: Path,
     model_label: str,
 ) -> dict[str, str]:
-    """Generate loss, metric, and prediction plots for ANN/LSTM artifact directories."""
+    """Build the standard neural-model plot bundle and return the saved-file manifest."""
     plot_dir = artifact_dir / "plots"
     ensure_parent_dir(plot_dir / ".keep")
 
     loss_history_df = pd.read_csv(artifact_dir / "loss_history.csv")
     epoch_metrics_df = pd.read_csv(artifact_dir / "epoch_metrics.csv")
     metrics_summary_df = pd.read_csv(artifact_dir / "metrics_summary.csv")
-    per_station_metrics_df = pd.read_csv(artifact_dir / "metrics_by_station.csv")
     prediction_df = pd.read_parquet(artifact_dir / "predictions.parquet")
 
     plot_loss_curves(
@@ -1261,10 +1322,6 @@ def generate_neural_plot_bundle(
         prediction_df,
         output_path=plot_dir / "test_residual_distribution.png",
     )
-    plot_direct_station_metric_bars(
-        per_station_metrics_df,
-        output_path=plot_dir / "test_worst_station_rmse.png",
-    )
     plot_direct_station_examples(
         prediction_df,
         output_path=plot_dir / "test_station_examples.png",
@@ -1281,7 +1338,6 @@ def generate_neural_plot_bundle(
         "test_metric_bars": str(plot_dir / "test_metric_bars.png"),
         "test_actual_vs_predicted": str(plot_dir / "test_actual_vs_predicted.png"),
         "test_residual_distribution": str(plot_dir / "test_residual_distribution.png"),
-        "test_worst_station_rmse": str(plot_dir / "test_worst_station_rmse.png"),
         "test_station_examples": str(plot_dir / "test_station_examples.png"),
         "test_forecast_windows": str(plot_dir / "test_forecast_windows.png"),
     }
@@ -1294,7 +1350,7 @@ def generate_model_comparison_plot_bundle(
     output_dir: Path,
     comparison_metrics_df: pd.DataFrame,
 ) -> dict[str, str]:
-    """Generate grouped comparison plots across multiple models."""
+    """Build a small comparison bundle across multiple trained models."""
     ensure_parent_dir(output_dir / ".keep")
 
     plot_model_comparison_bars(

@@ -1,4 +1,27 @@
-"""Generate plots for a completed XGBoost experiment artifact directory."""
+"""Generate the standard plot bundle for one XGBoost artifact directory.
+
+This script reads a completed XGBoost artifact directory, reloads the feature
+frame referenced by its saved config snapshot, and writes the evaluation plots
+defined in src.evaluation.plots.
+
+Use this script after training has finished when you want to regenerate plots
+without rerunning the model.
+
+Usage
+-----
+    .venv/Scripts/python scripts/plot_xgboost_results.py
+    .venv/Scripts/python scripts/plot_xgboost_results.py artifacts/advanced_seq/xgboost_advanced_context_w30_h3
+
+Inputs
+------
+    artifact_dir/config_snapshot.json
+    artifact_dir/training_summary.json
+    The feature parquet referenced by the saved config snapshot
+
+Outputs
+-------
+    artifact_dir/plots/
+"""
 
 from __future__ import annotations
 
@@ -25,7 +48,7 @@ def _resolve_artifact_dir(argv: list[str]) -> Path:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Generate round-by-round and summary plots for one XGBoost run."""
+    """Regenerate plots for one saved XGBoost artifact directory."""
     active_argv = argv or sys.argv
     logger = get_logger("plot_xgboost_results")
 

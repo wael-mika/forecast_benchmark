@@ -1,4 +1,28 @@
-"""Neural forecasting baselines and compact benchmark model variants."""
+"""Compact neural forecasting models used as baselines in the benchmark.
+
+Each model in this file is a lightweight, single-file implementation designed
+for fair comparison. All models share the same training interface: they receive
+a 30-day sequence of discharge and optional covariates, a vector of static
+window statistics, and a persistence baseline, and they output a residual
+correction added to that baseline.
+
+Models
+------
+ResidualANNForecaster
+    Flat MLP over window statistics. Fast, interpretable, strong baseline.
+ResidualBidirectionalLSTMForecaster
+    Bidirectional LSTM that encodes the full 30-day discharge sequence.
+ResidualNHiTSForecaster
+    Multi-scale residual MLP inspired by N-HiTS (Challu et al. 2023).
+ResidualPatchTSTForecaster
+    Patch-based Transformer over the discharge sequence (Nie et al. 2023).
+ResidualTemporalFusionTransformerForecaster
+    Compact TFT with LSTM encoder, attention, and GRN fusion.
+ResidualXLSTMForecaster
+    Stacked gated LSTM blocks inspired by xLSTM (Beck et al. 2024).
+ResidualMambaForecaster
+    Mamba-inspired cumulative-state sequence model (Gu & Dao 2023).
+"""
 
 from __future__ import annotations
 
@@ -17,6 +41,10 @@ def _build_mlp(
     *,
     dropout: float,
 ) -> nn.Sequential:
+    """Build a simple MLP: Linear → ReLU → Dropout, repeated, then a final Linear.
+
+    Uses ReLU (not GELU) to stay lightweight for the compact baseline variants.
+    """
     hidden_sizes = [int(size) for size in hidden_dims]
     layers: list[nn.Module] = []
     previous_dim = int(input_dim)
@@ -34,6 +62,11 @@ def _build_mlp(
 
 
 def _patchify_sequence(sequence_features: torch.Tensor, patch_len: int, patch_stride: int) -> torch.Tensor:
+    """Split a (batch, time, channels) sequence into overlapping patches.
+
+    If the sequence is shorter than ``patch_len``, it is zero-padded on the left.
+    Returns shape ``(batch, num_patches, patch_len, channels)``.
+    """
     sequence_length = int(sequence_features.size(1))
     if sequence_length < patch_len:
         padding = patch_len - sequence_length
@@ -42,7 +75,13 @@ def _patchify_sequence(sequence_features: torch.Tensor, patch_len: int, patch_st
 
 
 class ResidualANNForecaster(nn.Module):
-    """A compact MLP that learns corrections on top of a persistence baseline."""
+    """Compact MLP that predicts a residual correction on top of a persistence baseline.
+
+    Input: flattened window statistics (lag_mean, lag_std, etc.) + station embedding.
+    The model ignores the raw sequence entirely — it only sees the precomputed stats.
+    This is the simplest and fastest model in the benchmark, and often surprisingly
+    competitive on stations where recent discharge is the best predictor.
+    """
 
     def __init__(
         self,
@@ -81,7 +120,12 @@ class ResidualANNForecaster(nn.Module):
 
 
 class ResidualBidirectionalLSTMForecaster(nn.Module):
-    """A bidirectional LSTM with a dense residual prediction head."""
+    """Bidirectional LSTM over the 30-day discharge sequence with a residual MLP head.
+
+    The final hidden states of both directions are concatenated with static window
+    statistics, a station embedding, and the persistence baseline, then passed
+    through a small MLP to produce the multi-horizon correction.
+    """
 
     def __init__(
         self,
@@ -138,6 +182,14 @@ class ResidualBidirectionalLSTMForecaster(nn.Module):
 
 
 class _NHiTSBlock(nn.Module):
+    """Single N-HiTS block: average-pools the history to a coarser scale, then
+    produces a backcast (reconstruction of the input at that scale) and a forecast.
+
+    The backcast is interpolated back to the original length and subtracted from
+    the running residual, so each subsequent block focuses on what the previous
+    block could not explain.
+    """
+
     def __init__(
         self,
         *,
@@ -177,7 +229,13 @@ class _NHiTSBlock(nn.Module):
 
 
 class ResidualNHiTSForecaster(nn.Module):
-    """A compact multi-scale residual MLP inspired by N-HiTS."""
+    """Multi-scale hierarchical residual MLP, inspired by N-HiTS (Challu et al. 2023).
+
+    Stacks several ``_NHiTSBlock`` modules, each operating at a different temporal
+    resolution (controlled by ``pool_kernels``). Each block removes the part of the
+    signal it can explain (backcast), passing only the unexplained residual to the
+    next block. Final forecast = sum of all block forecasts + persistence baseline.
+    """
 
     def __init__(
         self,
@@ -234,7 +292,13 @@ class ResidualNHiTSForecaster(nn.Module):
 
 
 class ResidualPatchTSTForecaster(nn.Module):
-    """A small patch Transformer for direct multi-horizon forecasting."""
+    """Patch-based Transformer forecaster, inspired by PatchTST (Nie et al. 2023).
+
+    The 30-day sequence is split into overlapping patches, projected to tokens, then
+    processed by a standard Transformer encoder. The mean of all token encodings is
+    concatenated with static features and the persistence baseline before a small MLP
+    produces the multi-horizon correction.
+    """
 
     def __init__(
         self,
@@ -306,6 +370,12 @@ class ResidualPatchTSTForecaster(nn.Module):
 
 
 class _GatedResidualNetwork(nn.Module):
+    """Lightweight Gated Residual Network used by the compact TFT.
+
+    Applies: skip(x) + sigmoid(gate) * ELU(hidden(x)), then LayerNorm.
+    The skip connection uses a linear projection when input_dim != output_dim.
+    """
+
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, dropout: float) -> None:
         super().__init__()
         self.hidden = nn.Linear(input_dim, hidden_dim)
@@ -323,7 +393,16 @@ class _GatedResidualNetwork(nn.Module):
 
 
 class ResidualTemporalFusionTransformerForecaster(nn.Module):
-    """A compact TFT-style model with recurrent encoding and attention fusion."""
+    """Compact TFT-style model: LSTM encoder, multi-head attention, GRN fusion.
+
+    Static features are encoded into a context vector that conditions the LSTM.
+    A single attention query (from the static context) attends over all LSTM
+    timesteps to extract the most relevant historical information. The result
+    is fused with the static context and persistence baseline via a GRN head.
+
+    This is a streamlined version; the full TFT with variable selection and
+    seq2seq decoder lives in ``ResidualAdvancedTemporalFusionTransformerForecaster``.
+    """
 
     def __init__(
         self,
@@ -374,6 +453,14 @@ class ResidualTemporalFusionTransformerForecaster(nn.Module):
 
 
 class _ResidualXLSTMBlock(nn.Module):
+    """One gated residual LSTM block used by the compact xLSTM model.
+
+    Runs an LSTM over the sequence, projects its output back to ``model_dim``,
+    then applies a learned sigmoid gate (conditioned on both input and projected
+    output) before the residual add + LayerNorm. This stabilizes training when
+    stacking multiple blocks.
+    """
+
     def __init__(self, model_dim: int, hidden_size: int, dropout: float) -> None:
         super().__init__()
         self.lstm = nn.LSTM(model_dim, hidden_size, batch_first=True)
@@ -390,7 +477,13 @@ class _ResidualXLSTMBlock(nn.Module):
 
 
 class ResidualXLSTMForecaster(nn.Module):
-    """A residual stacked LSTM benchmark inspired by xLSTM-style scaling."""
+    """Stacked gated LSTM blocks, inspired by xLSTM-style deep recurrent scaling.
+
+    Projects the input sequence to ``model_dim``, then passes it through
+    ``num_blocks`` residual LSTM blocks. The last timestep's hidden state is
+    concatenated with static features, station embedding, and the persistence
+    baseline before a two-layer MLP predicts the correction.
+    """
 
     def __init__(
         self,
@@ -444,6 +537,15 @@ class ResidualXLSTMForecaster(nn.Module):
 
 
 class _MambaStyleBlock(nn.Module):
+    """Simplified Mamba-inspired block using a cumulative running average as the state.
+
+    This is NOT a faithful selective SSM implementation — it approximates the
+    Mamba gating structure with a causal cumulative mean, which is much cheaper to
+    compute. A sigmoid gate (from a parallel branch) selects how much of the running
+    state to let through. Use ``_MambaBlock`` in ``advanced_neural.py`` for the
+    faithful ZOH-discretized selective scan.
+    """
+
     def __init__(self, model_dim: int, expand_factor: int, kernel_size: int, dropout: float) -> None:
         super().__init__()
         inner_dim = model_dim * expand_factor
@@ -478,7 +580,13 @@ class _MambaStyleBlock(nn.Module):
 
 
 class ResidualMambaForecaster(nn.Module):
-    """A compact Mamba-inspired sequence forecaster with residual prediction head."""
+    """Compact Mamba-inspired forecaster built from simplified gated cumulative-state blocks.
+
+    Stacks ``num_blocks`` of ``_MambaStyleBlock`` over the projected sequence, then
+    summarizes with the last timestep and fuses with static context via an MLP head.
+    For the faithful selective SSM (ZOH, input-dependent B/C/Δ), see
+    ``ResidualAdvancedMambaForecaster`` in ``advanced_neural.py``.
+    """
 
     def __init__(
         self,

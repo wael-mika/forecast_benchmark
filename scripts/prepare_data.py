@@ -1,4 +1,26 @@
-"""Run the Milestone 1 GRDC ingestion pipeline."""
+"""Build the canonical discharge dataset from raw GRDC files.
+
+This script is the first data-preparation step in the repository. It loads
+configs/data.yaml, reads the raw station files, normalizes the station/date/
+value columns, and writes the processed canonical parquet used by the later
+feature-engineering scripts.
+
+Use this script after placing the raw GRDC exports in the directory referenced
+by configs/data.yaml.
+
+Usage
+-----
+    .venv/Scripts/python scripts/prepare_data.py
+
+Inputs
+------
+    raw_data_dir from configs/data.yaml
+    date/value/station column candidates from the same config
+
+Outputs
+-------
+    processed_data_path from configs/data.yaml
+"""
 
 from __future__ import annotations
 
@@ -15,7 +37,7 @@ from src.utils.logging import get_logger
 
 
 def main() -> None:
-    """Load config and prepare the processed canonical dataset."""
+    """Load the data config and write the canonical processed dataset."""
     logger = get_logger("prepare_data")
     config = load_yaml_config(PROJECT_ROOT / "configs" / "data.yaml")
 

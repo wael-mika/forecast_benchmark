@@ -1,4 +1,19 @@
-"""Forecast evaluation metrics for benchmark experiments."""
+"""Core forecast metrics used across training, evaluation, and reporting.
+
+This module keeps the metric formulas in one place so training code, saved
+evaluation tables, benchmark plots, and later analyses all use the same
+definitions. The helpers operate on long-form prediction frames with columns
+such as ``unique_id``, ``split``, ``y_true``, and ``y_pred``.
+
+Main helpers
+------------
+build_scale_reference
+    Build per-station denominators for MASE and RMSSE from train history.
+compute_metric_bundle
+    Compute one full set of metrics for a single prediction slice.
+summarize_prediction_metrics
+    Aggregate metrics at both the overall-split and per-station levels.
+"""
 
 from __future__ import annotations
 
@@ -30,17 +45,20 @@ def _clean_prediction_frame(
     actual_column: str,
     prediction_column: str,
 ) -> pd.DataFrame:
+    """Drop rows with missing actual or predicted values before scoring."""
     required_columns = [actual_column, prediction_column]
     return df.dropna(subset=required_columns).reset_index(drop=True)
 
 
 def _safe_mean(values: np.ndarray) -> float:
+    """Return the mean of ``values`` or ``NaN`` when the array is empty."""
     if values.size == 0:
         return float("nan")
     return float(np.mean(values))
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
+    """Return ``numerator / denominator`` while guarding against near-zero denominators."""
     if abs(denominator) <= EPSILON:
         return float("nan")
     return float(numerator / denominator)
@@ -53,7 +71,12 @@ def build_scale_reference(
     time_column: str = "target_ds",
     target_column: str = "target",
 ) -> pd.DataFrame:
-    """Build MASE/RMSSE denominators from in-sample target history."""
+    """Compute per-station naive-forecast scales used by MASE and RMSSE.
+
+    The denominators come from first differences of the in-sample target
+    history, so later evaluation can compare model error against a simple
+    one-step persistence-style baseline.
+    """
     ordered = df.sort_values([group_column, time_column], kind="stable").copy()
     diffs = ordered.groupby(group_column)[target_column].diff()
 
@@ -80,7 +103,7 @@ def compute_metric_bundle(
     mase_denominator_column: str = "mase_denominator",
     rmsse_denominator_column: str = "rmsse_denominator",
 ) -> dict[str, float]:
-    """Compute a broad metric bundle on a prediction frame."""
+    """Compute the standard regression and forecast metrics for one prediction slice."""
     cleaned = _clean_prediction_frame(df, actual_column=actual_column, prediction_column=prediction_column)
     if cleaned.empty:
         return {metric_name: float("nan") for metric_name in DEFAULT_METRIC_COLUMNS} | {"n_obs": 0}
@@ -142,7 +165,7 @@ def summarize_prediction_metrics(
     prediction_column: str = "y_pred",
     metric_columns: Iterable[str] = DEFAULT_METRIC_COLUMNS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Summarize metrics both overall by split and by split/station."""
+    """Build per-station metrics first, then derive micro and macro summaries by split."""
     metric_names = list(metric_columns)
 
     per_station_rows: list[dict[str, object]] = []

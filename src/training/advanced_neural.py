@@ -1,4 +1,20 @@
-"""Training helpers for scaled neural benchmark models and the hybrid architecture."""
+"""Training helpers for the full-scale neural and hybrid benchmark models.
+
+This module prepares the richer multivariate input bundles used by the advanced
+architectures in ``src.models.advanced_neural`` and runs their training loop.
+Compared with ``neural.py``, this path supports multichannel history, static
+covariates, known-future features, richer losses, and more flexible sampling
+for large runs.
+
+Main helpers
+------------
+prepare_advanced_neural_window_bundle
+    Build multivariate history, static context, and future-known tensors.
+train_advanced_neural_experiment
+    Train one advanced neural or hybrid model and save full artifacts.
+AdvancedNeuralWindowBundle
+    Store the prepared tensors, feature names, and normalization metadata.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +27,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.evaluation.metrics import DEFAULT_METRIC_COLUMNS, EPSILON
+from src.evaluation.metrics import DEFAULT_METRIC_COLUMNS, EPSILON, build_scale_reference
 from src.evaluation.pipeline import build_direct_prediction_frame, evaluate_direct_prediction_frame
 from src.models.advanced_neural import (
     ResidualAdvancedANNForecaster,
@@ -21,6 +37,7 @@ from src.models.advanced_neural import (
     ResidualAdvancedPatchTSTForecaster,
     ResidualAdvancedTemporalFusionTransformerForecaster,
     ResidualAdvancedXLSTMForecaster,
+    ResidualHydroFlowNetForecaster,
     ResidualHydroHybridForecaster,
 )
 from src.training.neural import StationNormalizer, TrainedNeuralExperiment
@@ -41,7 +58,7 @@ NON_FEATURE_COLUMNS = {
 
 @dataclass
 class AdvancedNeuralWindowBundle:
-    """Prepared tensors and metadata for advanced neural training."""
+    """All tensors and metadata needed to train one advanced neural model."""
 
     feature_df: pd.DataFrame
     lag_columns: list[str]
@@ -62,6 +79,7 @@ class AdvancedNeuralWindowBundle:
 
 
 def _require_torch():
+    """Import PyTorch lazily and apply environment safeguards first."""
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -77,6 +95,7 @@ def _require_torch():
 
 
 def _resolve_device(torch: Any, requested_device: str = "auto") -> Any:
+    """Pick the requested device or choose the best available accelerator automatically."""
     normalized = str(requested_device).lower()
     if normalized != "auto":
         return torch.device(normalized)
@@ -88,6 +107,7 @@ def _resolve_device(torch: Any, requested_device: str = "auto") -> Any:
 
 
 def _infer_target_lag_columns(feature_df: pd.DataFrame) -> list[str]:
+    """Return the target-history lag columns ordered from oldest lag to newest."""
     lag_columns = sorted(
         [column for column in feature_df.columns if re.fullmatch(r"lag_\d+", column)],
         key=lambda column: int(column.removeprefix("lag_")),
@@ -105,6 +125,7 @@ def _fit_station_normalizer(
     split_labels: np.ndarray,
     station_ids: list[str],
 ) -> StationNormalizer:
+    """Fit one log-space normalizer per station using only the train split."""
     mean_by_station = np.zeros(len(station_ids), dtype=np.float32)
     std_by_station = np.ones(len(station_ids), dtype=np.float32)
     train_mask = split_labels == "train"
@@ -132,6 +153,7 @@ def _fit_station_normalizer(
 
 
 def _standardize_array(values: np.ndarray, train_mask: np.ndarray) -> np.ndarray:
+    """Standardize a 2D or 3D array using train-split statistics and replace invalid values with zero."""
     if values.size == 0:
         return values.astype(np.float32)
 
@@ -154,6 +176,7 @@ def _standardize_array(values: np.ndarray, train_mask: np.ndarray) -> np.ndarray
 
 
 def _group_historic_exogenous_columns(feature_df: pd.DataFrame) -> dict[str, dict[int, str]]:
+    """Group historic exogenous columns by base name and lag number."""
     grouped: dict[str, dict[int, str]] = {}
     for column in feature_df.columns:
         if re.fullmatch(r"lag_\d+", column):
@@ -168,6 +191,7 @@ def _group_historic_exogenous_columns(feature_df: pd.DataFrame) -> dict[str, dic
 
 
 def _group_future_columns(feature_df: pd.DataFrame) -> dict[str, dict[int, str]]:
+    """Group known-future columns by base name and forecast horizon."""
     grouped: dict[str, dict[int, str]] = {}
     for column in feature_df.columns:
         match = re.fullmatch(r"(.+)_future_h(\d+)", column)
@@ -184,6 +208,7 @@ def _build_future_calendar_features(
     *,
     target_columns: list[str],
 ) -> tuple[np.ndarray, list[str]]:
+    """Build simple calendar features aligned with each forecast horizon."""
     if not target_columns:
         return np.zeros((len(feature_df), 0, 0), dtype=np.float32), []
 
@@ -210,7 +235,7 @@ def prepare_advanced_neural_window_bundle(
     *,
     min_sequence_coverage: float = 0.6,
 ) -> AdvancedNeuralWindowBundle:
-    """Build multivariate history, static covariates, and future-known covariates."""
+    """Build the multivariate tensors used by the advanced neural and hybrid models."""
     lag_columns = _infer_target_lag_columns(feature_df)
     target_columns = infer_direct_target_columns(feature_df)
     if not target_columns:
@@ -364,6 +389,7 @@ def prepare_advanced_neural_window_bundle(
 
 
 def _slice_loader_dataset(torch: Any, TensorDataset: Any, bundle: AdvancedNeuralWindowBundle, index_array: np.ndarray) -> Any:
+    """Convert a subset of the prepared advanced bundle into one ``TensorDataset``."""
     return TensorDataset(
         torch.tensor(bundle.sequence_features[index_array], dtype=torch.float32),
         torch.tensor(bundle.flat_features[index_array], dtype=torch.float32),
@@ -380,6 +406,7 @@ def _build_advanced_model(
     bundle: AdvancedNeuralWindowBundle,
     config: dict[str, Any],
 ) -> Any:
+    """Instantiate the requested advanced neural architecture from the prepared bundle metadata."""
     horizon_count = len(bundle.target_columns)
     station_count = len(bundle.normalizer.station_ids)
     sequence_input_dim = int(bundle.sequence_features.shape[2])
@@ -506,14 +533,33 @@ def _build_advanced_model(
             dropout=dropout,
             head_hidden_dim=int(config.get("head_hidden_dim", 256)),
         )
+    if model_name == "flownet":
+        return ResidualHydroFlowNetForecaster(
+            sequence_input_dim=sequence_input_dim,
+            static_input_dim=static_input_dim,
+            future_input_dim=future_input_dim,
+            horizon_count=horizon_count,
+            station_count=station_count,
+            embedding_dim=embedding_dim,
+            model_dim=int(config.get("model_dim", 128)),
+            num_mamba_blocks=int(config.get("num_mamba_blocks", 3)),
+            mamba_state_dim=int(config.get("mamba_state_dim", 32)),
+            multi_scale_kernels=config.get("multi_scale_kernels", [3, 7, 14]),
+            attention_heads=int(config.get("attention_heads", 8)),
+            decoder_lstm_layers=int(config.get("decoder_lstm_layers", 2)),
+            dropout=dropout,
+            head_hidden_dim=int(config.get("head_hidden_dim", 256)),
+        )
     raise ValueError(f"Unsupported advanced neural model_name: {model_name!r}")
 
 
 def _move_batch_to_device(batch: tuple[Any, ...], device: Any) -> tuple[Any, ...]:
+    """Move every tensor in one batch to the chosen training device."""
     return tuple(tensor.to(device) for tensor in batch)
 
 
 def _forward_batch(model_name: str, model: Any, batch: tuple[Any, ...]) -> tuple[Any, Any]:
+    """Run one forward pass and return predictions together with the target tensor."""
     sequence_features, flat_features, context_features, future_features, station_indices, targets, baseline = batch
     if model_name == "ann":
         predictions = model(sequence_features, flat_features, future_features, station_indices, baseline)
@@ -523,6 +569,7 @@ def _forward_batch(model_name: str, model: Any, batch: tuple[Any, ...]) -> tuple
 
 
 def _create_loss_function(nn: Any, config: dict[str, Any], *, horizon_count: int) -> Any:
+    """Create the configured loss for advanced neural training."""
     import torch
     import torch.nn.functional as F
 
@@ -598,6 +645,7 @@ def _predict_dataset(
     device: Any,
     loss_function: Any,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Run one full loader in evaluation mode and collect predictions, targets, and loss."""
     predictions: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     station_indices: list[np.ndarray] = []
@@ -628,8 +676,68 @@ def _predict_dataset(
     )
 
 
-def _compute_epoch_metric_bundle(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
-    """Compute lightweight micro metrics directly from arrays."""
+def _build_scale_reference_from_feature_frame(
+    feature_df: pd.DataFrame,
+    target_columns: list[str],
+    *,
+    split_column: str,
+    group_column: str = "unique_id",
+) -> pd.DataFrame:
+    """Build the train-based scale reference used later for MASE and RMSSE."""
+    train_rows = feature_df.loc[feature_df[split_column] == "train"].copy()
+    reference_frames: list[pd.DataFrame] = []
+    for target_column in target_columns:
+        horizon = int(target_column.removeprefix("target_h"))
+        target_ds_column = f"target_h{horizon}_ds"
+        reference_frames.append(
+            train_rows.loc[:, [group_column, target_ds_column, target_column]]
+            .rename(columns={target_ds_column: "target_ds", target_column: "target"})
+            .dropna(subset=["target_ds", "target"])
+        )
+
+    reference_df = (
+        pd.concat(reference_frames, ignore_index=True)
+        .drop_duplicates(subset=[group_column, "target_ds"], keep="first")
+        .sort_values([group_column, "target_ds"], kind="stable")
+        .reset_index(drop=True)
+    )
+    return build_scale_reference(reference_df, group_column=group_column, time_column="target_ds", target_column="target")
+
+
+def _build_station_scale_lookup(scale_reference_df: pd.DataFrame, station_ids: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Map station IDs to fixed MASE and RMSSE denominators for fast epoch evaluation."""
+    if scale_reference_df.empty:
+        nan_values = np.full(len(station_ids), np.nan, dtype=np.float64)
+        return nan_values.copy(), nan_values.copy()
+
+    indexed = scale_reference_df.set_index("unique_id")
+    mase_scale = indexed.reindex(station_ids)["mase_denominator"].to_numpy(dtype=np.float64)
+    rmsse_scale = indexed.reindex(station_ids)["rmsse_denominator"].to_numpy(dtype=np.float64)
+    return mase_scale, rmsse_scale
+
+
+def _prepare_scale_values(scale_values: np.ndarray | float | None, valid_mask: np.ndarray) -> np.ndarray | None:
+    """Align optional scale arrays with the valid rows used for metric computation."""
+    if scale_values is None:
+        return None
+
+    array = np.asarray(scale_values, dtype=np.float64).reshape(-1)
+    valid_count = int(np.sum(valid_mask))
+    if array.size == 1:
+        return np.full(valid_count, float(array[0]), dtype=np.float64)
+    if array.size != valid_mask.size:
+        raise ValueError("Scale arrays must match the shape of the target arrays.")
+    return array[valid_mask]
+
+
+def _compute_epoch_metric_bundle(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    mase_denominator: np.ndarray | float | None = None,
+    rmsse_denominator: np.ndarray | float | None = None,
+) -> dict[str, float]:
+    """Compute the standard metric bundle directly from arrays during epoch tracking."""
     valid_mask = np.isfinite(y_true) & np.isfinite(y_pred)
     if not np.any(valid_mask):
         return {metric_name: float("nan") for metric_name in DEFAULT_METRIC_COLUMNS} | {"n_obs": 0}
@@ -647,6 +755,8 @@ def _compute_epoch_metric_bundle(y_true: np.ndarray, y_pred: np.ndarray) -> dict
     nonzero_true_mask = np.abs(cleaned_true) > EPSILON
     smape_denominator = np.abs(cleaned_true) + np.abs(cleaned_pred)
     valid_smape_mask = smape_denominator > EPSILON
+    mase_scale = _prepare_scale_values(mase_denominator, valid_mask)
+    rmsse_scale = _prepare_scale_values(rmsse_denominator, valid_mask)
 
     mse = float(np.mean(squared_errors))
     metrics = {
@@ -669,6 +779,17 @@ def _compute_epoch_metric_bundle(y_true: np.ndarray, y_pred: np.ndarray) -> dict
         "mase": float("nan"),
         "rmsse": float("nan"),
     }
+
+    if mase_scale is not None:
+        valid_mase_mask = np.isfinite(mase_scale) & (mase_scale > EPSILON)
+        if np.any(valid_mase_mask):
+            metrics["mase"] = float(np.mean(absolute_errors[valid_mase_mask] / mase_scale[valid_mase_mask]))
+
+    if rmsse_scale is not None:
+        valid_rmsse_mask = np.isfinite(rmsse_scale) & (rmsse_scale > EPSILON)
+        if np.any(valid_rmsse_mask):
+            metrics["rmsse"] = float(np.sqrt(np.mean(squared_errors[valid_rmsse_mask] / rmsse_scale[valid_rmsse_mask])))
+
     return metrics
 
 
@@ -679,12 +800,13 @@ def _build_epoch_metric_frame(
     actual_targets: np.ndarray,
     predicted_targets: np.ndarray,
     station_indices: np.ndarray,
+    mase_scale_by_station: np.ndarray | None = None,
+    rmsse_scale_by_station: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """Create per-horizon micro AND macro metrics for epoch tracking.
+    """Build per-horizon micro and macro metrics for epoch-by-epoch monitoring.
 
-    Macro aggregation (mean across stations) is the primary early-stopping signal
-    because micro-averaging is dominated by high-flow large stations and hides
-    poor performance on small tributaries.
+    Macro aggregation is the main early-stopping view because it weights stations
+    more evenly than micro-averaging, which can be dominated by large rivers.
     """
     rows: list[dict[str, Any]] = []
     unique_stations = np.unique(station_indices) if station_indices.size else np.array([], dtype=np.int64)
@@ -694,9 +816,16 @@ def _build_epoch_metric_frame(
         horizon = int(target_column.removeprefix("target_h"))
         y_true_h = actual_targets[:, horizon_index]
         y_pred_h = predicted_targets[:, horizon_index]
+        mase_scale_h = mase_scale_by_station[station_indices] if mase_scale_by_station is not None else None
+        rmsse_scale_h = rmsse_scale_by_station[station_indices] if rmsse_scale_by_station is not None else None
 
-        # Micro: all stations pooled
-        micro_bundle = _compute_epoch_metric_bundle(y_true_h, y_pred_h)
+        # Micro view: score all stations together.
+        micro_bundle = _compute_epoch_metric_bundle(
+            y_true_h,
+            y_pred_h,
+            mase_denominator=mase_scale_h,
+            rmsse_denominator=rmsse_scale_h,
+        )
         rows.append(
             {
                 "split": split_name,
@@ -707,42 +836,38 @@ def _build_epoch_metric_frame(
             }
         )
 
-        # Macro: compute per-station metrics then average across stations
+        # Macro view: score each station separately, then average.
         if group_count > 0:
-            station_nse_values: list[float] = []
-            station_rmse_values: list[float] = []
+            station_metric_rows: list[dict[str, float]] = []
             for station_idx in unique_stations:
                 mask = station_indices == station_idx
-                if np.sum(mask) < 2:
+                if not np.any(mask):
                     continue
-                station_bundle = _compute_epoch_metric_bundle(y_true_h[mask], y_pred_h[mask])
-                if np.isfinite(station_bundle["nse"]):
-                    station_nse_values.append(station_bundle["nse"])
-                if np.isfinite(station_bundle["rmse"]):
-                    station_rmse_values.append(station_bundle["rmse"])
+                station_metric_rows.append(
+                    _compute_epoch_metric_bundle(
+                        y_true_h[mask],
+                        y_pred_h[mask],
+                        mase_denominator=mase_scale_h[mask] if mase_scale_h is not None else None,
+                        rmsse_denominator=rmsse_scale_h[mask] if rmsse_scale_h is not None else None,
+                    )
+                )
 
-            macro_nse = float(np.mean(station_nse_values)) if station_nse_values else float("nan")
-            macro_rmse = float(np.mean(station_rmse_values)) if station_rmse_values else float("nan")
-            rows.append(
-                {
-                    "split": split_name,
-                    "horizon": horizon,
-                    "aggregation": "macro",
-                    "n_groups": group_count,
-                    "n_obs": micro_bundle["n_obs"],
-                    "bias": float("nan"),
-                    "mae": float("nan"),
-                    "mse": float("nan"),
-                    "rmse": macro_rmse,
-                    "r2": macro_nse,
-                    "nse": macro_nse,
-                    "mape": float("nan"),
-                    "smape": float("nan"),
-                    "wape": float("nan"),
-                    "mase": float("nan"),
-                    "rmsse": float("nan"),
-                }
-            )
+            if station_metric_rows:
+                station_metrics_df = pd.DataFrame(station_metric_rows)
+                macro_metrics = {}
+                for metric_name in DEFAULT_METRIC_COLUMNS:
+                    finite_values = station_metrics_df[metric_name].dropna()
+                    macro_metrics[metric_name] = float(finite_values.mean()) if not finite_values.empty else float("nan")
+                rows.append(
+                    {
+                        "split": split_name,
+                        "horizon": horizon,
+                        "aggregation": "macro",
+                        "n_groups": group_count,
+                        "n_obs": int(station_metrics_df["n_obs"].sum()),
+                        **macro_metrics,
+                    }
+                )
 
     return pd.DataFrame(rows)
 
@@ -754,6 +879,7 @@ def _sample_epoch_eval_index(
     max_rows: int,
     seed: int,
 ) -> np.ndarray:
+    """Sample a stable subset of row indices for faster epoch-time evaluation."""
     if index_array.size == 0:
         return index_array
     bounded_fraction = min(max(float(fraction), 0.0), 1.0)
@@ -771,16 +897,17 @@ def _sample_epoch_eval_index(
 
 
 def _save_torch_checkpoint(torch: Any, payload: dict[str, Any], path: Path) -> None:
+    """Save one PyTorch checkpoint, creating parent folders when needed."""
     ensure_parent_dir(path)
     torch.save(payload, path)
 
 
 def train_advanced_neural_experiment(feature_df: pd.DataFrame, config: dict[str, Any]) -> TrainedNeuralExperiment:
-    """Train an advanced neural benchmark model on the prepared direct feature frame."""
+    """Train one advanced neural or hybrid benchmark model on the prepared direct feature frame."""
     torch, nn, DataLoader, TensorDataset = _require_torch()
 
     model_name = str(config.get("model_name", "")).lower()
-    supported_model_names = {"ann", "lstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid"}
+    supported_model_names = {"ann", "lstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"}
     if model_name not in supported_model_names:
         raise ValueError(f"train_advanced_neural_experiment supports only {sorted(supported_model_names)}.")
 
@@ -903,10 +1030,24 @@ def train_advanced_neural_experiment(feature_df: pd.DataFrame, config: dict[str,
         "validation": bundle.feature_df.iloc[validation_index].reset_index(drop=True),
         "test": bundle.feature_df.iloc[test_index].reset_index(drop=True),
     }
-    # Track macro-averaged NSE (mean across stations, then across horizons) as the primary
-    # early-stopping criterion. Macro-NSE treats all stations equally regardless of flow
-    # magnitude, which is critical for Slovak river data with highly heterogeneous stations.
+    scale_reference_df = _build_scale_reference_from_feature_frame(
+        bundle.feature_df,
+        bundle.target_columns,
+        split_column=str(config.get("split_column", "split")),
+    )
+    mase_scale_by_station, rmsse_scale_by_station = _build_station_scale_lookup(
+        scale_reference_df,
+        bundle.normalizer.station_ids,
+    )
+    early_stopping_metric = str(config.get("early_stopping_metric", "nse")).lower()
+    if early_stopping_metric not in {"nse", "rmse"}:
+        raise ValueError(
+            f"Unsupported early_stopping_metric: {early_stopping_metric!r}. Choose 'nse' or 'rmse'."
+        )
+    # Primary early-stopping signal. 'rmse': minimize val micro-RMSE (absolute accuracy, better
+    # for flood peaks). 'nse': maximize macro-averaged NSE (relative skill, station-equal weighting).
     best_validation_macro_nse = float("-inf")
+    best_validation_micro_rmse = float("inf")
     best_epoch = 0
     epochs_without_improvement = 0
     best_model_path = artifact_dir / "model.pt"
@@ -969,6 +1110,8 @@ def train_advanced_neural_experiment(feature_df: pd.DataFrame, config: dict[str,
                     actual_targets=actual_targets,
                     predicted_targets=restored_predictions,
                     station_indices=station_indices,
+                    mase_scale_by_station=mase_scale_by_station,
+                    rmsse_scale_by_station=rmsse_scale_by_station,
                 )
             )
 
@@ -1002,8 +1145,12 @@ def train_advanced_neural_experiment(feature_df: pd.DataFrame, config: dict[str,
             flush=True,
         )
         if scheduler_name == "plateau" and scheduler is not None:
-            # ReduceLROnPlateau: pass negative NSE so "min" mode corresponds to max NSE
-            scheduler.step(-validation_macro_nse if np.isfinite(validation_macro_nse) else validation_micro_rmse)
+            if early_stopping_metric == "rmse":
+                # Scheduler is in "min" mode; pass RMSE directly (lower is better).
+                scheduler.step(validation_micro_rmse if np.isfinite(validation_micro_rmse) else float("inf"))
+            else:
+                # Negate NSE so "min" mode corresponds to maximizing NSE.
+                scheduler.step(-validation_macro_nse if np.isfinite(validation_macro_nse) else validation_micro_rmse)
         elif scheduler_name == "cosine" and scheduler is not None:
             scheduler.step()
 
@@ -1017,8 +1164,14 @@ def train_advanced_neural_experiment(feature_df: pd.DataFrame, config: dict[str,
             "validation_micro_rmse": validation_micro_rmse,
         }
 
-        if validation_macro_nse > best_validation_macro_nse:
+        if early_stopping_metric == "rmse":
+            improved = np.isfinite(validation_micro_rmse) and validation_micro_rmse < best_validation_micro_rmse
+        else:
+            improved = validation_macro_nse > best_validation_macro_nse
+
+        if improved:
             best_validation_macro_nse = validation_macro_nse
+            best_validation_micro_rmse = validation_micro_rmse
             best_epoch = epoch
             epochs_without_improvement = 0
             best_model_epoch_path = artifact_dir / f"model_epoch_{epoch:04d}.pt"

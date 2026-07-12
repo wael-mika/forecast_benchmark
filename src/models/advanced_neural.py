@@ -1,4 +1,61 @@
-"""Scaled neural forecasting variants and a hybrid architecture for hydrological benchmarking."""
+"""Full-scale neural forecasting architectures for Slovak river discharge forecasting.
+
+This module contains the production-quality, scaled-up versions of every model
+in the benchmark. All models consume a 30-day multivariate history (discharge +
+optional ERA5 weather / hydrological covariates), optional future covariates
+(known-ahead weather), and a persistence baseline, and output per-horizon
+residual corrections.
+
+All sequence models apply RevIN (Reversible Instance Normalization) before the
+encoder so predictions are scale-invariant across stations with very different
+discharge regimes (e.g., Váh at Trenčín vs. small tributaries).
+
+Models
+------
+ResidualAdvancedANNForecaster
+    Deep residual MLP over flattened history + static features. No recurrence.
+ResidualAdvancedLSTMForecaster
+    Bidirectional LSTM augmented with a depthwise temporal conv pre-processing
+    block and context-conditioned attention pooling.
+ResidualAdvancedNHiTSForecaster
+    Larger N-HiTS (Challu et al. 2023) with MaxPool blocks, condition vectors
+    built from static + future + exogenous history projections.
+ResidualAdvancedPatchTSTForecaster
+    Channel-independent PatchTST (Nie et al. 2023): each input channel runs
+    through a shared Transformer; per-channel forecasts are blended with
+    learned softmax weights.
+ResidualAdvancedTemporalFusionTransformerForecaster
+    Full TFT (Lim et al. 2021): Variable Selection Networks for past and future,
+    static-context-initialized LSTM encoder/decoder, multi-head interpretable
+    attention, and GLU-gated skip connections throughout.
+ResidualAdvancedXLSTMForecaster
+    Matrix LSTM (mLSTM) blocks from xLSTM (Beck et al. 2024) with expand_factor=2:
+    head_dim=48, stabilized log-space gates, attention-pooled context fusion.
+ResidualAdvancedMambaForecaster
+    Faithful Mamba selective SSM (Gu & Dao 2023) with ZOH discretization,
+    input-dependent B/C/Δ, and an SE-Net channel gate to suppress irrelevant
+    ERA5 channels before the input projection.
+ResidualHydroHybridForecaster
+    Custom hybrid: depthwise temporal conv blocks → bidirectional LSTM → cross-
+    attention between future tokens and historical memory → GRN decoder head.
+ResidualHydroFlowNetForecaster
+    FlowNet: multi-scale parallel conv (3/7/14/21-day kernels) → stacked Mamba
+    SSM → seq2seq LSTM decoder initialized from encoder state → cross-attention
+    → GRN output. Designed specifically for daily Slovak streamflow.
+
+Shared building blocks (private, prefixed with _)
+--------------------------------------------------
+ReversibleInstanceNorm      Per-sample per-channel normalization + denorm (Kim et al. 2022)
+_GatedResidualNetwork       GRN from TFT paper (ELU + GLU + skip + LayerNorm)
+_VariableSelectionNetwork   VSN from TFT paper (per-variable GRN + softmax selection)
+_MambaBlock                 Selective SSM block with ZOH discretization (Gu & Dao 2023)
+_mLSTMBlock                 Matrix LSTM block from xLSTM (Beck et al. 2024)
+_TemporalConvBlock          Gated depthwise conv + pointwise FFN with residual
+_MultiScaleFusion           Parallel conv branches at different kernel sizes, softmax blend
+_AttentionPooling           Context-conditioned soft attention pooling over a sequence
+_StaticEncoder              Projects static + station embedding → fixed-size context vector
+_FutureFeatureEncoder       Horizon embeddings + optional future covariate projection
+"""
 
 from __future__ import annotations
 
@@ -17,6 +74,11 @@ def _build_feed_forward(
     *,
     dropout: float,
 ) -> nn.Sequential:
+    """Build a feed-forward stack: Linear → LayerNorm → GELU → Dropout, then a final Linear.
+
+    Preferred over ``_build_mlp`` in ``neural.py`` for the advanced models because
+    LayerNorm + GELU trains more stably at larger widths.
+    """
     layers: list[nn.Module] = []
     current_dim = int(input_dim)
     for hidden_dim in [int(value) for value in hidden_dims]:
@@ -34,6 +96,8 @@ def _build_feed_forward(
 
 
 class _ResidualMLPBlock(nn.Module):
+    """Pre-norm residual MLP block: LayerNorm → Linear → GELU → Dropout → Linear → Dropout, then residual add."""
+
     def __init__(self, input_dim: int, hidden_dim: int, *, dropout: float) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(input_dim)
@@ -50,6 +114,13 @@ class _ResidualMLPBlock(nn.Module):
 
 
 class _ResidualFeedForward(nn.Module):
+    """Stacked residual MLP: projects input to ``hidden_dim``, passes through N ``_ResidualMLPBlock``s,
+    then projects to ``output_dim`` via LayerNorm + Linear.
+
+    Used as a general-purpose encoder for flat feature vectors (e.g., future covariates,
+    exogenous history). Deeper than a plain MLP with better gradient flow.
+    """
+
     def __init__(
         self,
         input_dim: int,
@@ -75,6 +146,11 @@ class _ResidualFeedForward(nn.Module):
 
 
 class _StationConditioningMixin:
+    """Mixin that provides a helper for projecting static + station embedding to a fixed dimension.
+
+    Handles the edge case where ``static_features`` has zero columns (context-only level).
+    """
+
     def _encode_static_context(
         self,
         static_features: torch.Tensor,
@@ -148,6 +224,13 @@ class ReversibleInstanceNorm(nn.Module):
 
 
 class _AttentionPooling(nn.Module):
+    """Context-conditioned soft attention pooling over a variable-length sequence.
+
+    Computes a query from the context vector, scores each timestep with a tanh dot-product,
+    applies softmax, and returns the weighted sum. Effectively learns "which timestep matters
+    most given the current static/future context".
+    """
+
     def __init__(self, input_dim: int, context_dim: int) -> None:
         super().__init__()
         self.query = nn.Linear(context_dim, input_dim)
@@ -161,6 +244,13 @@ class _AttentionPooling(nn.Module):
 
 
 class _FutureFeatureEncoder(nn.Module):
+    """Encodes known-ahead future covariates into per-horizon tokens.
+
+    Adds a learned horizon index embedding to distinguish h=1 from h=2 from h=3.
+    If ``input_dim > 0``, projects the covariate values and adds them to the embedding.
+    If there are no future features (input_dim=0), returns just the horizon embedding.
+    """
+
     def __init__(self, input_dim: int, horizon_count: int, model_dim: int, dropout: float) -> None:
         super().__init__()
         self.horizon_embedding = nn.Embedding(horizon_count, model_dim)
@@ -177,6 +267,12 @@ class _FutureFeatureEncoder(nn.Module):
 
 
 class _StaticEncoder(nn.Module):
+    """Encodes the concatenation of static features + station embedding into a fixed-size context vector.
+
+    If ``input_dim == 0`` (context-only level with no static features), the station embedding
+    is used directly without projection. Output is LayerNorm'd + dropped out.
+    """
+
     def __init__(self, input_dim: int, output_dim: int, dropout: float) -> None:
         super().__init__()
         self.projection = nn.Linear(input_dim, output_dim) if input_dim > 0 else None
@@ -194,6 +290,7 @@ class _StaticEncoder(nn.Module):
 
 
 def _make_same_padding_conv(model_dim: int, kernel_size: int) -> nn.Conv1d:
+    """Create a depthwise Conv1d with same-length padding (output length == input length)."""
     return nn.Conv1d(
         model_dim,
         model_dim,
@@ -204,6 +301,15 @@ def _make_same_padding_conv(model_dim: int, kernel_size: int) -> nn.Conv1d:
 
 
 class _TemporalConvBlock(nn.Module):
+    """Gated depthwise temporal conv block with a pointwise feed-forward and residual.
+
+    Flow: pointwise expand (×2) → depthwise conv → GLU gating → pointwise project back
+    → residual add → pointwise FFN with GELU → residual add.
+
+    The GLU gate (value * sigmoid(gate)) lets the network selectively suppress or pass
+    each temporal feature. Same-length padding preserves sequence length throughout.
+    """
+
     def __init__(self, model_dim: int, *, kernel_size: int, expansion: int, dropout: float) -> None:
         super().__init__()
         inner_dim = model_dim * int(expansion)
@@ -233,7 +339,17 @@ class _TemporalConvBlock(nn.Module):
 
 
 class ResidualAdvancedANNForecaster(nn.Module):
-    """A deeper residual MLP baseline over flattened history, static, and future inputs."""
+    """Deep residual MLP baseline — the non-sequential reference model.
+
+    Input: flattened feature vector (all lag columns, window stats, etc.) concatenated
+    with a station embedding and the persistence baseline scalar. No sequence dimension
+    is used — the raw 30-day sequence is ignored.
+
+    Stacks ``num_blocks`` of ``_ResidualMLPBlock`` at width ``hidden_dim`` for better
+    gradient flow than a plain deep MLP. Despite its simplicity, this model is often
+    competitive because the precomputed lag/stat features already capture most of the
+    predictive signal.
+    """
 
     def __init__(
         self,
@@ -271,7 +387,19 @@ class ResidualAdvancedANNForecaster(nn.Module):
 
 
 class ResidualAdvancedLSTMForecaster(nn.Module):
-    """A conv-augmented bidirectional LSTM with attention pooling over multivariate history."""
+    """Bidirectional LSTM with temporal conv pre-processing and attention-pooled context fusion.
+
+    Pipeline:
+      1. RevIN normalization over all input channels.
+      2. Linear projection → ``model_dim``.
+      3. One ``_TemporalConvBlock`` with a 5-day depthwise kernel smooths local patterns.
+      4. Bidirectional LSTM encodes the full 30-day sequence.
+      5. Context-conditioned attention pooling collapses the sequence to a single vector.
+      6. Static encoder + future encoder produce context vectors.
+      7. Pooled + last-hidden + static + future + baseline → MLP correction head.
+
+    The temporal conv step helps the LSTM by pre-smoothing ERA5 noise before recurrence.
+    """
 
     def __init__(
         self,
@@ -356,6 +484,13 @@ class ResidualAdvancedLSTMForecaster(nn.Module):
 
 
 class _AdvancedNHiTSBlock(nn.Module):
+    """One block of the advanced N-HiTS model.
+
+    MaxPool-downsamples the target history to a coarser scale (controlled by ``pool_kernel``),
+    concatenates with a ``condition_dim``-dimensional context vector (static + future + history),
+    then produces a backcast (upsampled back to original length) and a horizon forecast.
+    """
+
     def __init__(
         self,
         *,
@@ -389,7 +524,15 @@ class _AdvancedNHiTSBlock(nn.Module):
 
 
 class ResidualAdvancedNHiTSForecaster(nn.Module):
-    """A larger N-HiTS-style forecaster conditioned on static and future covariates."""
+    """Scaled N-HiTS forecaster (Challu et al. 2023) conditioned on static, future, and history context.
+
+    Improvements over the compact version in ``neural.py``:
+    - MaxPool instead of AvgPool (sharper peak detection for flood events).
+    - Separate condition vector from static encoder + future encoder + exogenous history projection,
+      all concatenated before each block so every scale sees the same rich conditioning.
+    - Larger hidden dims (default 512 × 512) and 4 pool scales [1, 2, 4, 8].
+    - Final forecast = sum of all block forecasts + persistence baseline.
+    """
 
     def __init__(
         self,
@@ -466,6 +609,15 @@ class ResidualAdvancedNHiTSForecaster(nn.Module):
 
 
 def _patchify_channels(sequence_features: torch.Tensor, patch_len: int, patch_stride: int) -> torch.Tensor:
+    """Split a multivariate sequence into per-channel patches for channel-independent processing.
+
+    Input:  (batch, time, channels)
+    Output: (batch * channels, num_patches, patch_len) — all channels as independent samples.
+
+    Each channel is treated as a separate "batch item" so a single shared Transformer
+    encoder processes all channels without cross-channel attention (channel-independent design).
+    Left-pads with zeros if the sequence is shorter than ``patch_len``.
+    """
     batch_size, sequence_length, channel_count = sequence_features.shape
     if sequence_length < patch_len:
         pad_length = patch_len - sequence_length
@@ -864,19 +1016,21 @@ class _mLSTMBlock(nn.Module):
     - Hidden:       h_t = o_t * (C_t q_t) / max(|n_t^T q_t|, 1)
     """
 
-    def __init__(self, model_dim: int, *, num_heads: int = 4, dropout: float) -> None:
+    def __init__(self, model_dim: int, *, num_heads: int = 4, expand_factor: int = 2, dropout: float) -> None:
         super().__init__()
         assert model_dim % num_heads == 0, "model_dim must be divisible by num_heads"
         self.num_heads = num_heads
-        self.head_dim = model_dim // num_heads
+        d_inner = model_dim * expand_factor
+        self.head_dim = d_inner // num_heads
 
         self.norm = nn.LayerNorm(model_dim)
-        # Input projections for q, k, v, output gate, input gate, forget gate
-        self.qkv_proj = nn.Linear(model_dim, model_dim * 3)
-        self.o_proj = nn.Linear(model_dim, model_dim)
-        self.i_proj = nn.Linear(model_dim, num_heads)   # log input gate (one per head)
-        self.f_proj = nn.Linear(model_dim, num_heads)   # log forget gate (one per head)
-        self.out_proj = nn.Linear(model_dim, model_dim)
+        self.in_proj = nn.Linear(model_dim, d_inner)         # expand to d_inner
+        # Input projections for q, k, v, output gate, input gate, forget gate (in expanded space)
+        self.qkv_proj = nn.Linear(d_inner, d_inner * 3)
+        self.o_proj = nn.Linear(d_inner, d_inner)
+        self.i_proj = nn.Linear(d_inner, num_heads)          # log input gate (one per head)
+        self.f_proj = nn.Linear(d_inner, num_heads)          # log forget gate (one per head)
+        self.out_proj = nn.Linear(d_inner, model_dim)        # project back to model_dim
         self.dropout = nn.Dropout(dropout)
         self.feed_forward = nn.Sequential(
             nn.LayerNorm(model_dim),
@@ -892,13 +1046,14 @@ class _mLSTMBlock(nn.Module):
         H, d = self.num_heads, self.head_dim
 
         normed = self.norm(x)
-        qkv = self.qkv_proj(normed).reshape(B, T, 3, H, d)
+        expanded = self.in_proj(normed)                           # (B, T, d_inner)
+        qkv = self.qkv_proj(expanded).reshape(B, T, 3, H, d)
         q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]  # each (B, T, H, d)
         # Normalize k so memory updates stay bounded
         k = k / (math.sqrt(d) + 1e-6)
-        o = torch.sigmoid(self.o_proj(normed).reshape(B, T, H, d))
-        log_i = self.i_proj(normed)   # (B, T, H)
-        log_f = F.logsigmoid(self.f_proj(normed))  # (B, T, H) — use log-sigmoid for forget
+        o = torch.sigmoid(self.o_proj(expanded).reshape(B, T, H, d))
+        log_i = self.i_proj(expanded)   # (B, T, H)
+        log_f = F.logsigmoid(self.f_proj(expanded))  # (B, T, H) — use log-sigmoid for forget
 
         # Stabilizer: m_t = max(log_f_t + m_{t-1}, log_i_t)
         C = torch.zeros(B, H, d, d, device=x.device, dtype=x.dtype)
@@ -930,8 +1085,8 @@ class _mLSTMBlock(nn.Module):
             h_t = o[:, t, :, :] * (h_raw / denom.unsqueeze(-1))
             outputs.append(h_t)
 
-        # Stack: (B, T, H, d) → (B, T, D)
-        hidden = torch.stack(outputs, dim=1).reshape(B, T, D)
+        # Stack: (B, T, H, d) → (B, T, H*d=d_inner) → project back to model_dim
+        hidden = torch.stack(outputs, dim=1).reshape(B, T, H * d)
         hidden = self.out_proj(self.dropout(hidden))
         x = x + hidden
         x = x + self.feed_forward(x)
@@ -939,7 +1094,16 @@ class _mLSTMBlock(nn.Module):
 
 
 class ResidualAdvancedXLSTMForecaster(nn.Module):
-    """xLSTM forecaster using matrix LSTM (mLSTM) blocks (Beck et al. 2024)."""
+    """xLSTM forecaster using matrix LSTM (mLSTM) blocks (Beck et al. 2024).
+
+    Each ``_mLSTMBlock`` uses expand_factor=2 (d_inner = 2 × model_dim, head_dim = 48 with
+    4 heads), stabilized log-space input/forget gates, and a matrix memory update
+    (v ⊗ k outer product). Stacks ``num_blocks`` blocks over the RevIN-normalized sequence.
+
+    The full sequence is collapsed to a single vector via context-conditioned attention
+    pooling (not just the last timestep), which performs better on irregular flood events
+    where the most informative timestep may not be the most recent.
+    """
 
     def __init__(
         self,
@@ -1115,7 +1279,16 @@ class _MambaBlock(nn.Module):
 
 
 class ResidualAdvancedMambaForecaster(nn.Module):
-    """Mamba forecaster using selective state-space blocks (Gu & Dao 2023)."""
+    """Mamba forecaster using faithful selective SSM blocks (Gu & Dao 2023).
+
+    Key design choices:
+    - SE-Net channel gate: temporal mean → sigmoid → multiplicative gate applied before the
+      input projection. Discharge channel naturally dominates; irrelevant ERA5 channels
+      (e.g., snowfall in summer) are soft-suppressed without hard feature selection.
+    - Stacked ``_MambaBlock``s with ZOH discretization, input-dependent B/C/Δ, and SiLU gating.
+    - Attention pooling (not last-timestep) for the sequence summary.
+    - Static + future context fused in the prediction head alongside the persistence baseline.
+    """
 
     def __init__(
         self,
@@ -1136,6 +1309,10 @@ class ResidualAdvancedMambaForecaster(nn.Module):
         super().__init__()
         self.station_embedding = nn.Embedding(station_count, embedding_dim)
         self.revin = ReversibleInstanceNorm(sequence_input_dim)
+        self.channel_gate = nn.Sequential(
+            nn.Linear(sequence_input_dim, sequence_input_dim),
+            nn.Sigmoid(),
+        )
         self.input_projection = nn.Linear(sequence_input_dim, model_dim)
         self.blocks = nn.ModuleList(
             [
@@ -1167,7 +1344,9 @@ class ResidualAdvancedMambaForecaster(nn.Module):
         station_index: torch.Tensor,
         baseline: torch.Tensor,
     ) -> torch.Tensor:
-        hidden = self.input_projection(self.revin(sequence_features))
+        normed = self.revin(sequence_features)                           # (B, T, C)
+        gate = self.channel_gate(normed.mean(dim=1))                     # (B, C)
+        hidden = self.input_projection(normed * gate.unsqueeze(1))       # (B, T, model_dim)
         for block in self.blocks:
             hidden = block(hidden)
 
@@ -1184,7 +1363,20 @@ class ResidualAdvancedMambaForecaster(nn.Module):
 
 
 class ResidualHydroHybridForecaster(nn.Module):
-    """A new conv-recurrent-attention hybrid tailored to hydrological forecasting."""
+    """Conv-recurrent-attention hybrid designed for daily hydrological forecasting.
+
+    Architecture:
+      1. RevIN normalization + linear projection → ``model_dim``.
+      2. ``conv_blocks`` of gated depthwise ``_TemporalConvBlock`` (local pattern extraction).
+      3. Bidirectional LSTM over the projected (not conv-modified) sequence for long-range memory.
+      4. Concatenate conv output + LSTM output → project back to ``model_dim`` (history memory).
+      5. Future covariate tokens (horizon embeddings + projected future features) + static bias.
+      6. Cross-attention: future tokens query the history memory to retrieve relevant context.
+      7. GRN decoder: fused [future | attended | global_context | static | baseline] → correction.
+
+    The parallel conv + LSTM branches give complementary views: convolutions detect sharp
+    local events (rainfall spikes) while the LSTM tracks slow baseflow trends.
+    """
 
     def __init__(
         self,
@@ -1263,4 +1455,216 @@ class ResidualHydroHybridForecaster(nn.Module):
             torch.cat([future_tokens, attended_future, global_context, repeated_static, baseline.unsqueeze(-1)], dim=-1)
         )
         correction = self.output_projection(fused).squeeze(-1)
+        return baseline + correction
+
+
+# ── FlowNet: multi-scale conv + Mamba encoder + seq2seq LSTM decoder ────────
+
+
+class _MultiScaleFusion(nn.Module):
+    """Parallel temporal conv branches at different kernel sizes with learnable weighted merge.
+
+    Each branch independently processes the input with its own kernel size, capturing
+    patterns at different temporal scales. A learned softmax weighting blends the outputs.
+    Since each _TemporalConvBlock contains an internal residual, the weighted average of
+    branch outputs equals x + weighted_blend(per-scale modifications).
+    """
+
+    def __init__(self, model_dim: int, kernel_sizes: Iterable[int], dropout: float) -> None:
+        super().__init__()
+        kernel_list = [max(1, int(k)) for k in kernel_sizes]
+        self.branches = nn.ModuleList(
+            [_TemporalConvBlock(model_dim, kernel_size=k, expansion=2, dropout=dropout) for k in kernel_list]
+        )
+        self.branch_weights = nn.Parameter(torch.ones(len(kernel_list)))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Each branch(x) returns x + scale-specific modification (residual inside)
+        branch_outputs = torch.stack([branch(x) for branch in self.branches], dim=0)  # (n, B, T, d)
+        weights = torch.softmax(self.branch_weights, dim=0)                           # (n,)
+        return (branch_outputs * weights.view(-1, 1, 1, 1)).sum(dim=0)               # (B, T, d)
+
+
+class ResidualHydroFlowNetForecaster(nn.Module):
+    """FlowNet: multi-scale conv encoder + Mamba SSM + seq2seq LSTM decoder.
+
+    Architecture overview
+    ---------------------
+    Encoder
+      1. RevIN per-sample normalization over all input channels.
+      2. Linear projection → model_dim.
+      3. Multi-scale parallel conv fusion (default kernels: 3, 7, 14 days):
+         three independent TemporalConvBlocks capture flash-event, soil-moisture,
+         and baseflow patterns simultaneously; outputs blended with learned softmax weights.
+      4. Stacked Mamba SSM blocks: selective state-space encoding that learns which
+         historical signals to propagate across long gaps (e.g., antecedent soil moisture
+         weeks before a flood).
+      5. Context-conditioned attention pooling → global history summary vector.
+
+    Decoder
+      6. Future covariate tokens: linear projection + learned horizon embedding + static bias.
+      7. 2-layer LSTM decoder initialized from global history summary, processes future tokens
+         one step per horizon — produces smooth, physically plausible forecast trajectories.
+      8. Cross-attention (decoder queries, encoder sequence keys/values) + GLU gating:
+         each decoder step retrieves the most relevant historical context for that horizon.
+      9. GRN fusion of attended decoder state + static context + per-step baseline value
+         → per-step correction added to the persistence baseline.
+
+    Design motivation for daily Slovak streamflow forecasting
+    ---------------------------------------------------------
+    - Multi-scale kernels 3/7/14 match flash-runoff / soil recharge / baseflow timescales.
+    - Mamba's selective scan outperforms biLSTM on long sparse memory (e.g., dry-spell state).
+    - The LSTM decoder with encoder-state initialization learns smooth inter-horizon
+      dependencies, unlike decoding all horizons independently.
+    - GRN gating stabilizes gradients through deep computation paths.
+    """
+
+    def __init__(
+        self,
+        *,
+        sequence_input_dim: int,
+        static_input_dim: int,
+        future_input_dim: int,
+        horizon_count: int,
+        station_count: int,
+        embedding_dim: int = 16,
+        model_dim: int = 128,
+        num_mamba_blocks: int = 3,
+        mamba_state_dim: int = 32,
+        multi_scale_kernels: Iterable[int] = (3, 7, 14),
+        attention_heads: int = 8,
+        decoder_lstm_layers: int = 2,
+        dropout: float = 0.1,
+        head_hidden_dim: int = 256,
+    ) -> None:
+        super().__init__()
+        self.horizon_count = int(horizon_count)
+        self._future_input_dim = max(1, int(future_input_dim))
+        self._decoder_lstm_layers = int(decoder_lstm_layers)
+
+        # ── Normalization + projection ──────────────────────────────────────
+        self.station_embedding = nn.Embedding(station_count, embedding_dim)
+        self.revin = ReversibleInstanceNorm(sequence_input_dim)
+        self.channel_gate = nn.Sequential(
+            nn.Linear(sequence_input_dim, sequence_input_dim),
+            nn.Sigmoid(),
+        )
+        self.input_projection = nn.Linear(sequence_input_dim, model_dim)
+
+        # ── Multi-scale parallel conv ───────────────────────────────────────
+        self.multi_scale_conv = _MultiScaleFusion(model_dim, multi_scale_kernels, dropout)
+
+        # ── Mamba encoder blocks ────────────────────────────────────────────
+        self.mamba_blocks = nn.ModuleList(
+            [
+                _MambaBlock(model_dim, state_dim=int(mamba_state_dim), kernel_size=4, dropout=dropout)
+                for _ in range(int(num_mamba_blocks))
+            ]
+        )
+        self.encoder_norm = nn.LayerNorm(model_dim)
+
+        # ── Static context ──────────────────────────────────────────────────
+        self.static_encoder = _StaticEncoder(static_input_dim + embedding_dim, model_dim, dropout)
+        self.global_pooling = _AttentionPooling(model_dim, model_dim)
+
+        # ── Future token encoding ───────────────────────────────────────────
+        self.future_projection = _GatedResidualNetwork(
+            self._future_input_dim, head_hidden_dim, model_dim, dropout
+        )
+        self.horizon_embedding = nn.Embedding(self.horizon_count, model_dim)
+
+        # ── Seq2seq LSTM decoder ────────────────────────────────────────────
+        # GRN maps pooled history → initial hidden state for decoder LSTM
+        self.decoder_init_grn = _GatedResidualNetwork(model_dim, head_hidden_dim, model_dim, dropout)
+        self.decoder_lstm = nn.LSTM(
+            model_dim,
+            model_dim,
+            num_layers=self._decoder_lstm_layers,
+            batch_first=True,
+            dropout=dropout if self._decoder_lstm_layers > 1 else 0.0,
+        )
+
+        # ── Cross-attention + GLU gating ────────────────────────────────────
+        # Ensure model_dim is divisible by attention_heads
+        num_heads = int(attention_heads)
+        while model_dim % num_heads != 0 and num_heads > 1:
+            num_heads -= 1
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=model_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.cross_attn_gate = nn.Linear(model_dim, model_dim * 2)
+        self.cross_attn_norm = nn.LayerNorm(model_dim)
+
+        # ── Output: GRN fusion → per-horizon correction ─────────────────────
+        # input: [dec_out(d) | static_context(d) | baseline_step(1)]
+        self.output_grn = _GatedResidualNetwork(
+            model_dim + model_dim + 1, head_hidden_dim, model_dim, dropout
+        )
+        self.output_projection = nn.Linear(model_dim, 1)
+
+    def forward(
+        self,
+        sequence_features: torch.Tensor,
+        static_features: torch.Tensor,
+        future_features: torch.Tensor,
+        station_index: torch.Tensor,
+        baseline: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = int(sequence_features.size(0))
+
+        # ── Encoder ──────────────────────────────────────────────────────────
+        normed = self.revin(sequence_features)                           # (B, T, C)
+        gate = self.channel_gate(normed.mean(dim=1))                     # (B, C)
+        hidden = self.input_projection(normed * gate.unsqueeze(1))       # (B, T, d)
+        hidden = self.multi_scale_conv(hidden)                          # (B, T, d)
+        for block in self.mamba_blocks:
+            hidden = block(hidden)                                       # (B, T, d)
+        encoded = self.encoder_norm(hidden)                             # (B, T, d)
+
+        # ── Static context ────────────────────────────────────────────────────
+        station_emb = self.station_embedding(station_index)
+        static_context = self.static_encoder(static_features, station_emb)  # (B, d)
+        global_context = self.global_pooling(encoded, static_context)        # (B, d)
+
+        # ── Future tokens ─────────────────────────────────────────────────────
+        if future_features.size(-1) == 0:
+            future_features = torch.zeros(
+                batch_size, self.horizon_count, self._future_input_dim,
+                device=sequence_features.device, dtype=sequence_features.dtype,
+            )
+        fut = future_features[..., : self._future_input_dim]
+        if fut.size(-1) < self._future_input_dim:
+            pad = torch.zeros(
+                batch_size, self.horizon_count, self._future_input_dim - fut.size(-1),
+                device=fut.device, dtype=fut.dtype,
+            )
+            fut = torch.cat([fut, pad], dim=-1)
+
+        horizon_idx = torch.arange(self.horizon_count, device=sequence_features.device)
+        future_tokens = (
+            self.future_projection(fut)
+            + self.horizon_embedding(horizon_idx).unsqueeze(0)
+            + static_context.unsqueeze(1)
+        )  # (B, H, d)
+
+        # ── Seq2seq LSTM decoder ──────────────────────────────────────────────
+        # Initialize hidden state from pooled encoder summary via GRN
+        init_state = self.decoder_init_grn(global_context)                              # (B, d)
+        h0 = init_state.unsqueeze(0).expand(self._decoder_lstm_layers, -1, -1).contiguous()  # (L, B, d)
+        c0 = torch.zeros_like(h0)
+        dec_out, _ = self.decoder_lstm(future_tokens, (h0, c0))                         # (B, H, d)
+
+        # ── Cross-attention: decoder attends to full encoder sequence ─────────
+        attn_out, _ = self.cross_attention(dec_out, encoded, encoded)   # (B, H, d)
+        gate_h = self.cross_attn_gate(attn_out)                         # (B, H, 2d)
+        value, gate = gate_h.chunk(2, dim=-1)
+        dec_out = self.cross_attn_norm(dec_out + value * torch.sigmoid(gate))  # (B, H, d)
+
+        # ── Output: fuse decoder + static + baseline → per-horizon correction ─
+        static_expanded = static_context.unsqueeze(1).expand_as(dec_out)  # (B, H, d)
+        baseline_exp = baseline.unsqueeze(-1)                              # (B, H, 1)
+        fused = self.output_grn(
+            torch.cat([dec_out, static_expanded, baseline_exp], dim=-1)
+        )                                                                   # (B, H, d)
+        correction = self.output_projection(fused).squeeze(-1)             # (B, H)
         return baseline + correction

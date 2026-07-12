@@ -1,4 +1,26 @@
-"""Training helpers for benchmark experiments."""
+"""Training helpers for tree-based models and simple deterministic baselines.
+
+This module contains the shared training entry points for the non-neural part
+of the benchmark. It handles single-target XGBoost runs, direct multi-horizon
+XGBoost runs, and no-train baselines such as persistence or seasonal naive.
+It also provides the small inference helpers needed to rebuild the exact
+feature view expected by saved XGBoost models.
+
+Main helpers
+------------
+infer_feature_columns
+    Select model-ready input columns from a prepared feature frame.
+infer_direct_target_columns
+    Find the horizon-specific target columns in a direct setup.
+train_xgboost_experiment
+    Train one XGBoost model for a single target column.
+train_direct_xgboost_experiment
+    Train one XGBoost model per forecast horizon.
+run_direct_seasonal_naive_experiment
+    Build deterministic direct predictions without fitting a model.
+predict_with_xgboost / predict_direct_xgboost
+    Run inference with one saved booster or a full direct bundle.
+"""
 
 from __future__ import annotations
 
@@ -30,7 +52,7 @@ NON_FEATURE_COLUMNS = {
 
 @dataclass
 class TrainedXGBoostExperiment:
-    """Container returned by the XGBoost training pipeline."""
+    """Return bundle for a single-target XGBoost training run."""
 
     booster: Any
     feature_frame: pd.DataFrame
@@ -41,7 +63,7 @@ class TrainedXGBoostExperiment:
 
 @dataclass
 class TrainedDirectXGBoostExperiment:
-    """Container returned by the direct multi-horizon XGBoost pipeline."""
+    """Return bundle for a direct multi-horizon XGBoost training run."""
 
     boosters: dict[int, Any]
     feature_frame: pd.DataFrame
@@ -53,7 +75,7 @@ class TrainedDirectXGBoostExperiment:
 
 @dataclass
 class TrainedDirectBaselineExperiment:
-    """Container returned by deterministic no-train direct baselines."""
+    """Return bundle for a deterministic direct baseline with no fitted model."""
 
     feature_frame: pd.DataFrame
     target_columns: list[str]
@@ -63,7 +85,8 @@ class TrainedDirectBaselineExperiment:
 
 
 def _require_xgboost():
-    # Some macOS Python environments preload a second OpenMP runtime before XGBoost.
+    # Some environments load a conflicting OpenMP runtime before XGBoost.
+    # This keeps import failures from surfacing on otherwise valid setups.
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     try:
         import xgboost as xgb  # type: ignore
@@ -79,7 +102,7 @@ def infer_feature_columns(
     *,
     extra_excluded_columns: set[str] | None = None,
 ) -> list[str]:
-    """Infer model-ready feature columns from the prepared feature frame."""
+    """Return usable feature columns after removing known ID, target, and metadata fields."""
     excluded_columns = set(NON_FEATURE_COLUMNS)
     if extra_excluded_columns is not None:
         excluded_columns.update(extra_excluded_columns)
@@ -93,7 +116,7 @@ def infer_feature_columns(
 
 
 def infer_direct_target_columns(feature_df: pd.DataFrame) -> list[str]:
-    """Infer direct forecast target columns from a prepared multi-horizon frame."""
+    """Return the ordered target columns for a direct multi-horizon setup."""
     return sorted(
         [
             column
@@ -108,7 +131,7 @@ def run_direct_seasonal_naive_experiment(
     feature_df: pd.DataFrame,
     config: dict[str, Any],
 ) -> TrainedDirectBaselineExperiment:
-    """Run a deterministic persistence or seasonal-naive baseline."""
+    """Build direct baseline predictions using persistence or seasonal naive logic."""
     artifact_dir = Path(config.get("artifact_dir", "artifacts/seasonal_naive"))
     ensure_parent_dir(artifact_dir / "training_summary.json")
 
@@ -179,6 +202,7 @@ def _prepare_model_frame(
     *,
     use_station_id_as_feature: bool,
 ) -> tuple[pd.DataFrame, list[str], bool]:
+    """Optionally add station ID as a categorical feature and report the final feature list."""
     model_frame = feature_df.copy()
     used_feature_columns = list(feature_columns)
     enable_categorical = False
@@ -199,6 +223,7 @@ def _build_dmatrix(
     target_column: str,
     enable_categorical: bool,
 ) -> Any:
+    """Create the XGBoost ``DMatrix`` used for training or inference."""
     return xgb.DMatrix(
         df.loc[:, feature_columns],
         label=df[target_column],
@@ -207,7 +232,7 @@ def _build_dmatrix(
 
 
 def prepare_inference_frame(feature_df: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
-    """Rebuild lightweight derived inference features expected by the saved model."""
+    """Recreate lightweight derived columns that a saved XGBoost model expects at inference time."""
     model_frame = feature_df.copy()
     if "station_id_feature" in feature_columns and "station_id_feature" not in model_frame.columns:
         if "unique_id" not in model_frame.columns:
@@ -217,6 +242,7 @@ def prepare_inference_frame(feature_df: pd.DataFrame, feature_columns: list[str]
 
 
 def _build_training_checkpoint_callback(xgb: Any, checkpoint_dir: Path, interval: int) -> Any:
+    """Create a version-compatible XGBoost checkpoint callback."""
     ensure_parent_dir(checkpoint_dir / ".keep")
     try:
         return xgb.callback.TrainingCheckPoint(
@@ -233,6 +259,7 @@ def _build_training_checkpoint_callback(xgb: Any, checkpoint_dir: Path, interval
 
 
 def _save_feature_importance(booster: Any, feature_columns: list[str], artifact_dir: Path) -> None:
+    """Save gain-based feature importance for one trained XGBoost model."""
     raw_gain_scores = booster.get_score(importance_type="gain")
     feature_importance_df = pd.DataFrame(
         {
@@ -247,7 +274,7 @@ def train_xgboost_experiment(
     feature_df: pd.DataFrame,
     config: dict[str, Any],
 ) -> TrainedXGBoostExperiment:
-    """Train an XGBoost regressor on the prepared supervised feature frame."""
+    """Train one XGBoost regressor on a prepared single-target feature frame."""
     xgb = _require_xgboost()
 
     split_column = config.get("split_column", "split")
@@ -377,7 +404,7 @@ def train_direct_xgboost_experiment(
     feature_df: pd.DataFrame,
     config: dict[str, Any],
 ) -> TrainedDirectXGBoostExperiment:
-    """Train one direct XGBoost model per forecast horizon."""
+    """Train a separate XGBoost model for each direct forecast horizon."""
     xgb = _require_xgboost()
 
     split_column = config.get("split_column", "split")
@@ -537,7 +564,7 @@ def predict_with_xgboost(
     enable_categorical: bool = False,
     iteration_range: tuple[int, int] | None = None,
 ) -> pd.Series:
-    """Generate predictions for a prepared XGBoost feature frame."""
+    """Run inference with one XGBoost booster and return predictions as a series."""
     xgb = _require_xgboost()
     model_frame = prepare_inference_frame(feature_df, feature_columns)
     inference_matrix = _build_dmatrix(
@@ -561,7 +588,7 @@ def predict_direct_xgboost(
     feature_columns: list[str],
     enable_categorical: bool = False,
 ) -> pd.DataFrame:
-    """Generate one prediction column per horizon for a direct XGBoost bundle."""
+    """Run inference with a direct XGBoost bundle and return one prediction column per horizon."""
     prediction_frame = pd.DataFrame(index=feature_df.index)
     for horizon, booster in sorted(boosters.items()):
         prediction_frame[f"prediction_h{horizon}"] = predict_with_xgboost(

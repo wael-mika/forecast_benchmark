@@ -1,4 +1,22 @@
-"""Training helpers for neural benchmark models."""
+"""Training helpers for the compact neural baseline models.
+
+This module prepares the normalized input tensors used by the lightweight
+neural baselines in ``src.models.neural`` and runs their training loop. The
+focus here is on simple, fair baseline models: one shared data pipeline, one
+shared training loop, and one consistent evaluation path across ANN, LSTM,
+N-HiTS, PatchTST, TFT, xLSTM, and Mamba variants.
+
+Main helpers
+------------
+prepare_neural_window_bundle
+    Turn the direct feature frame into normalized tensors for baseline models.
+train_neural_experiment
+    Train one compact neural model and save checkpoints plus evaluation tables.
+StationNormalizer
+    Store per-station log-scale statistics and undo normalization at inference.
+TrainedNeuralExperiment
+    Return the trained model together with saved metrics and prediction tables.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +46,7 @@ from src.utils.seed import set_global_seed
 
 @dataclass
 class StationNormalizer:
-    """Per-station normalization metadata used for neural baselines."""
+    """Store per-station log-space normalization statistics for the baseline models."""
 
     station_ids: list[str]
     station_to_index: dict[str, int]
@@ -54,7 +72,7 @@ class StationNormalizer:
 
 @dataclass
 class NeuralWindowBundle:
-    """Prepared tensors and metadata for neural training."""
+    """All tensors and metadata needed to train one compact neural baseline."""
 
     feature_df: pd.DataFrame
     lag_columns: list[str]
@@ -72,7 +90,7 @@ class NeuralWindowBundle:
 
 @dataclass
 class TrainedNeuralExperiment:
-    """Container returned by the neural baseline training pipeline."""
+    """Return bundle for one compact neural training run."""
 
     model: Any
     model_name: str
@@ -87,6 +105,7 @@ class TrainedNeuralExperiment:
 
 
 def _require_torch():
+    """Import PyTorch lazily and apply a few environment safeguards first."""
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -102,6 +121,7 @@ def _require_torch():
 
 
 def _resolve_device(torch: Any, requested_device: str = "auto") -> Any:
+    """Pick the requested device or choose the best available accelerator automatically."""
     normalized = str(requested_device).lower()
     if normalized != "auto":
         return torch.device(normalized)
@@ -113,6 +133,7 @@ def _resolve_device(torch: Any, requested_device: str = "auto") -> Any:
 
 
 def _infer_lag_columns(feature_df: pd.DataFrame) -> list[str]:
+    """Return lag columns ordered from oldest lag to most recent lag."""
     lag_columns = sorted(
         [column for column in feature_df.columns if column.startswith("lag_") and column[4:].isdigit()],
         key=lambda column: int(column.removeprefix("lag_")),
@@ -129,6 +150,7 @@ def _infer_extra_context_columns(
     lag_columns: list[str],
     target_columns: list[str],
 ) -> list[str]:
+    """Collect numeric context columns that are not part of the lag or target sequence."""
     excluded_columns = {
         "unique_id",
         "ds",
@@ -156,6 +178,7 @@ def _fit_station_normalizer(
     split_labels: np.ndarray,
     station_ids: list[str],
 ) -> StationNormalizer:
+    """Fit one mean and standard deviation per station in log1p space using train rows only."""
     mean_by_station = np.zeros(len(station_ids), dtype=np.float32)
     std_by_station = np.ones(len(station_ids), dtype=np.float32)
     train_mask = split_labels == "train"
@@ -189,6 +212,7 @@ def _standardize_extra_context_features(
     feature_columns: list[str],
     split_labels: np.ndarray,
 ) -> np.ndarray:
+    """Standardize optional extra context features using train-split statistics."""
     if not feature_columns:
         return np.zeros((len(feature_df), 0), dtype=np.float32)
 
@@ -203,7 +227,7 @@ def _standardize_extra_context_features(
 
 
 def prepare_neural_window_bundle(feature_df: pd.DataFrame) -> NeuralWindowBundle:
-    """Build normalized neural inputs from the shared direct feature frame."""
+    """Build the normalized sequence, context, target, and baseline tensors for compact neural models."""
     lag_columns = _infer_lag_columns(feature_df)
     target_columns = infer_direct_target_columns(feature_df)
     if not target_columns:
@@ -276,6 +300,7 @@ def _build_scale_reference_from_feature_frame(
     split_column: str,
     group_column: str = "unique_id",
 ) -> pd.DataFrame:
+    """Build the train-based scale reference used later for MASE and RMSSE."""
     train_rows = feature_df.loc[feature_df[split_column] == "train"].copy()
     reference_frames: list[pd.DataFrame] = []
     for target_column in target_columns:
@@ -297,6 +322,7 @@ def _build_scale_reference_from_feature_frame(
 
 
 def _slice_loader_dataset(torch: Any, TensorDataset: Any, bundle: NeuralWindowBundle, index_array: np.ndarray) -> Any:
+    """Convert a subset of the prepared bundle into one ``TensorDataset``."""
     return TensorDataset(
         torch.tensor(bundle.sequence_features[index_array], dtype=torch.float32),
         torch.tensor(bundle.flat_features[index_array], dtype=torch.float32),
@@ -313,6 +339,7 @@ def _build_model(
     bundle: NeuralWindowBundle,
     config: dict[str, Any],
 ) -> Any:
+    """Instantiate the requested compact neural model from the prepared bundle metadata."""
     del torch
     horizon_count = len(bundle.target_columns)
     station_count = len(bundle.normalizer.station_ids)
@@ -416,10 +443,12 @@ def _build_model(
 
 
 def _move_batch_to_device(batch: tuple[Any, ...], device: Any) -> tuple[Any, ...]:
+    """Move every tensor in one batch to the chosen training device."""
     return tuple(tensor.to(device) for tensor in batch)
 
 
 def _forward_batch(model_name: str, model: Any, batch: tuple[Any, ...]) -> tuple[Any, Any]:
+    """Run one forward pass and return predictions together with the target tensor."""
     sequence_features, flat_features, context_features, station_indices, targets, baseline = batch
     if model_name == "ann":
         predictions = model(sequence_features, flat_features, station_indices, baseline)
@@ -429,6 +458,7 @@ def _forward_batch(model_name: str, model: Any, batch: tuple[Any, ...]) -> tuple
 
 
 def _create_loss_function(nn: Any, config: dict[str, Any]) -> Any:
+    """Create the configured point loss for compact neural training."""
     loss_name = str(config.get("loss_name", "smooth_l1")).lower()
     if loss_name == "mse":
         return nn.MSELoss()
@@ -446,6 +476,7 @@ def _predict_dataset(
     device: Any,
     loss_function: Any,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Run one full loader in evaluation mode and collect predictions, targets, and loss."""
     predictions: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     station_indices: list[np.ndarray] = []
@@ -477,12 +508,13 @@ def _predict_dataset(
 
 
 def _save_torch_checkpoint(torch: Any, payload: dict[str, Any], path: Path) -> None:
+    """Save one PyTorch checkpoint, creating parent folders when needed."""
     ensure_parent_dir(path)
     torch.save(payload, path)
 
 
 def train_neural_experiment(feature_df: pd.DataFrame, config: dict[str, Any]) -> TrainedNeuralExperiment:
-    """Train a neural benchmark model on the shared direct feature frame."""
+    """Train one compact neural benchmark model on the prepared direct feature frame."""
     torch, nn, DataLoader, TensorDataset = _require_torch()
 
     model_name = str(config.get("model_name", "")).lower()

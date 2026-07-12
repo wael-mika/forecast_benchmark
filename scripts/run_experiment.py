@@ -1,4 +1,36 @@
-"""Run one benchmark experiment end to end."""
+"""Run one configured experiment from training through metric export.
+
+This script reads a single YAML config, loads the referenced feature parquet,
+trains the requested model, builds a prediction frame, evaluates it, and writes
+predictions plus metrics into the configured artifact directory.
+
+Supported config families
+-------------------------
+- XGBoost single-output and direct multi-horizon runs.
+- Neural runs, including baseline and advanced variants.
+- Direct seasonal naive baselines.
+
+Use this script when you want to execute one experiment directly from a config
+file instead of using the higher-level suite runner.
+
+Usage
+-----
+    .venv/Scripts/python scripts/run_experiment.py
+    .venv/Scripts/python scripts/run_experiment.py configs/xgboost.yaml
+    .venv/Scripts/python scripts/run_experiment.py configs/ann_advanced_weather.yaml
+
+Inputs
+------
+    YAML config
+        Selects the model, feature parquet, split columns, and artifact dir.
+    Feature parquet
+        Loaded from config["feature_frame_path"].
+
+Outputs
+-------
+    The configured artifact directory receives model files, predictions, and
+    evaluation tables saved through src.evaluation.pipeline.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +68,7 @@ def _resolve_config_path(argv: list[str]) -> Path:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Train the configured baseline and evaluate it on the configured splits."""
+    """Run one experiment end to end using the selected config file."""
     active_argv = argv or sys.argv
     logger = get_logger("run_experiment")
     config_path = _resolve_config_path(active_argv)
@@ -95,9 +127,9 @@ def main(argv: list[str] | None = None) -> None:
             group_column="unique_id",
         )
         artifact_dir = experiment.artifact_dir
-    elif model_name in {"ann", "lstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid"}:
+    elif model_name in {"ann", "lstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"}:
         model_variant = str(config.get("model_variant", "baseline")).lower()
-        if model_variant == "advanced" or model_name == "hybrid":
+        if model_variant == "advanced" or model_name in {"hybrid", "flownet"}:
             from src.training.advanced_neural import train_advanced_neural_experiment
 
             experiment = train_advanced_neural_experiment(feature_df, training_config)

@@ -1,4 +1,9 @@
-"""Random seed helpers."""
+"""Reproducibility helpers for Python, NumPy, and optional PyTorch runs.
+
+This module contains the small seed utility shared by the training pipelines.
+The goal is not perfect determinism in every backend, but a single place to
+apply the lightweight reproducibility controls used in this benchmark.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ import numpy as np
 
 
 def set_global_seed(seed: int) -> None:
-    """Set lightweight reproducibility controls used later in the benchmark."""
+    """Set the random seed for Python, NumPy, and PyTorch when PyTorch is available."""
     random.seed(seed)
     np.random.seed(seed)
 

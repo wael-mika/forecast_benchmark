@@ -1,27 +1,34 @@
-"""Download hydrologically-relevant ERA5 variables missing from the base reanalysis.
+"""Download and assemble additional hydro reanalysis features.
 
-Variables confirmed working via the open-meteo archive API (tested 2026-03-16):
+This script extends the base weather reanalysis with hydrology-relevant ERA5
+and ERA5-Land variables such as radiation, evapotranspiration, soil
+temperature, soil moisture, and snow water equivalent. It manages the raw
+cache files and writes one processed parquet in the same long format as
+reanalysis_daily.parquet.
 
-ERA5-seamless (daily endpoint):
-  era5_shortwave_radiation_sum      daily MJ/m²  — drives snowmelt & ET
-  era5_wind_speed_10m_mean          daily km/h   — secondary ET driver
-  era5_et0_fao_evapotranspiration   daily mm     — basin water loss (FAO-56)
+Use this script after the canonical discharge parquet and station metadata are
+available. It is the highest-level entry point for hydro enrichment.
 
-ERA5-Land (daily endpoint, ~9 km resolution):
-  era5l_soil_temperature_0_to_7cm_mean    °C  — top-layer soil temp
-  era5l_soil_temperature_7_to_28cm_mean   °C
-  era5l_soil_temperature_28_to_100cm_mean °C
-  era5l_soil_temperature_100_to_255cm_mean°C  — deep thermal inertia
+Inputs
+------
+    configs/reanalysis.yaml
+    The canonical parquet referenced by that config
+    The station metadata referenced by that config
 
-ERA5-Land (hourly endpoint → aggregated to daily mean):
-  era5l_soil_moisture_0_to_7cm      m³/m³  — controls fast runoff generation
-  era5l_soil_moisture_7_to_28cm     m³/m³  — root-zone (dominant layer)
-  era5l_soil_moisture_28_to_100cm   m³/m³  — sub-root storage
-  era5l_soil_moisture_100_to_255cm  m³/m³  — deep groundwater proxy
-  era5l_snow_depth_water_equivalent mm     — snowpack; key for spring peaks
+Outputs
+-------
+    data/raw/reanalysis_open_meteo_hydro/
+    data/processed/reanalysis_hydro_daily.parquet
 
-Output: data/processed/reanalysis_hydro_daily.parquet
-        (same long format as reanalysis_daily.parquet — join on [unique_id, ds])
+Usage
+-----
+    .venv/Scripts/python scripts/download_hydro_enrichment.py
+
+Notes
+-----
+    Daily variables are downloaded in batches. Hourly soil moisture and snow
+    variables are downloaded per station and aggregated to daily values before
+    the final save.
 """
 
 from __future__ import annotations
@@ -294,6 +301,7 @@ def _hourly_payload_to_daily_frame(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """Download hydro enrichment variables and save the combined daily parquet."""
     config = load_yaml_config(PROJECT_ROOT / "configs" / "reanalysis.yaml")
 
     canonical_df = pd.read_parquet(PROJECT_ROOT / config["canonical_data_path"])

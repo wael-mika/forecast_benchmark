@@ -1,4 +1,25 @@
-"""Download public ERA5-style daily reanalysis features for Slovakia stations."""
+"""Download the base daily reanalysis dataset for all benchmark stations.
+
+This script reads configs/reanalysis.yaml, derives one request specification per
+station, downloads the public Open-Meteo reanalysis variables, and writes the
+raw cache, processed parquet, and metadata files referenced by the config.
+
+Use this script before building weather-based feature frames.
+
+Usage
+-----
+    .venv/Scripts/python scripts/download_reanalysis_data.py
+    .venv/Scripts/python scripts/download_reanalysis_data.py configs/reanalysis.yaml
+
+Inputs
+------
+    canonical_data_path and station_metadata_path from the selected config
+
+Outputs
+-------
+    raw_output_dir, processed_output_path, and metadata_output_path from the
+    selected config
+"""
 
 from __future__ import annotations
 
@@ -17,7 +38,7 @@ from src.utils.logging import get_logger
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Download public reanalysis data and save one processed parquet dataset."""
+    """Download the configured base reanalysis dataset and save its outputs."""
     active_argv = argv or sys.argv
     logger = get_logger("download_reanalysis_data")
 

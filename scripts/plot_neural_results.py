@@ -1,4 +1,26 @@
-"""Generate plots for ANN or LSTM experiment artifact directories."""
+"""Generate the standard plot bundle for one trained neural run.
+
+This script reads the selected config file, resolves its artifact directory,
+loads the saved training summary, and regenerates the neural evaluation plots
+without retraining the model.
+
+Use this script after an ANN, LSTM, or advanced neural run when you want fresh
+plots from the saved artifacts.
+
+Usage
+-----
+    .venv/Scripts/python scripts/plot_neural_results.py
+    .venv/Scripts/python scripts/plot_neural_results.py configs/ann_advanced_weather.yaml
+
+Inputs
+------
+    Selected YAML config
+    artifact_dir/training_summary.json
+
+Outputs
+-------
+    artifact_dir/plots/
+"""
 
 from __future__ import annotations
 
@@ -21,7 +43,7 @@ def _resolve_config_path(argv: list[str]) -> Path:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Generate summary plots for a trained ANN or LSTM run."""
+    """Regenerate plots for one saved neural artifact directory."""
     active_argv = argv or sys.argv
     logger = get_logger("plot_neural_results")
 

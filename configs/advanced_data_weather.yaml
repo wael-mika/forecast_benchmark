@@ -6,7 +6,7 @@ reanalysis_data_path: data/processed/reanalysis_daily.parquet
 feature_frame_path: data/processed/xgboost/features_weather_plus_w14_h3.parquet
 artifact_dir: artifacts/advanced/xgboost_weather_w14_h3
 
-window_size: 14
+window_size: 30
 horizons: [1, 2, 3]
 include_current_observation: true
 include_window_stats: true
@@ -21,8 +21,8 @@ reanalysis_variables:
   - era5_temperature_2m_max
   - era5_temperature_2m_min
   - era5_precipitation_hours
-reanalysis_lags: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
-reanalysis_windows: [3, 7, 14]
+reanalysis_lags: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+reanalysis_windows: [3, 7, 14, 21]
 include_future_reanalysis: false  # DISABLED: shift(-horizon) leaks future ground-truth ERA5 into features
 
 use_flow_context: true
