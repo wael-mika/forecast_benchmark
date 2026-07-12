@@ -426,7 +426,7 @@ def _build_advanced_model(
             num_blocks=int(config.get("num_blocks", 4)),
             dropout=dropout,
         )
-    if model_name == "lstm":
+    if model_name in {"lstm", "bilstm"}:
         return ResidualAdvancedLSTMForecaster(
             sequence_input_dim=sequence_input_dim,
             static_input_dim=static_input_dim,
@@ -440,6 +440,7 @@ def _build_advanced_model(
             kernel_size=int(config.get("kernel_size", 5)),
             dropout=dropout,
             head_hidden_dim=int(config.get("head_hidden_dim", 256)),
+            bidirectional=(model_name == "bilstm"),
         )
     if model_name == "nhits":
         return ResidualAdvancedNHiTSForecaster(
@@ -907,13 +908,20 @@ def train_advanced_neural_experiment(feature_df: pd.DataFrame, config: dict[str,
     torch, nn, DataLoader, TensorDataset = _require_torch()
 
     model_name = str(config.get("model_name", "")).lower()
-    supported_model_names = {"ann", "lstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"}
+    supported_model_names = {"ann", "lstm", "bilstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"}
     if model_name not in supported_model_names:
         raise ValueError(f"train_advanced_neural_experiment supports only {sorted(supported_model_names)}.")
 
     artifact_dir = Path(config.get("artifact_dir", f"artifacts/{model_name}_advanced"))
     ensure_parent_dir(artifact_dir / "training_summary.json")
     set_global_seed(int(config.get("seed", 42)))
+
+    # Guard against consuming a leaky frame with known-future weather columns.
+    leaky_columns = [c for c in feature_df.columns if re.search(r"_future_h\d+", c)]
+    if leaky_columns:
+        raise ValueError(
+            f"Feature frame contains forbidden future columns: {leaky_columns}"
+        )
 
     bundle = prepare_advanced_neural_window_bundle(
         feature_df,

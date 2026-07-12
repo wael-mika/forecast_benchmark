@@ -34,6 +34,7 @@ Outputs
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -83,6 +84,14 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     feature_df = pd.read_parquet(feature_frame_path)
+
+    # Reject any frame carrying known-future weather columns (leakage guard).
+    leaky_columns = [c for c in feature_df.columns if re.search(r"_future_h\d+", c)]
+    if leaky_columns:
+        raise ValueError(
+            f"Feature frame {feature_frame_path} contains forbidden future columns: {leaky_columns}"
+        )
+
     training_config = {**config, "artifact_dir": str(PROJECT_ROOT / config["artifact_dir"])}
     if model_name == "xgboost" and "horizons" in config:
         experiment = train_direct_xgboost_experiment(feature_df, training_config)
@@ -127,7 +136,7 @@ def main(argv: list[str] | None = None) -> None:
             group_column="unique_id",
         )
         artifact_dir = experiment.artifact_dir
-    elif model_name in {"ann", "lstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"}:
+    elif model_name in {"ann", "lstm", "bilstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"}:
         model_variant = str(config.get("model_variant", "baseline")).lower()
         if model_variant == "advanced" or model_name in {"hybrid", "flownet"}:
             from src.training.advanced_neural import train_advanced_neural_experiment
