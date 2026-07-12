@@ -41,3 +41,4 @@ state_dim: 48
 num_blocks: 3
 kernel_size: 5
 head_hidden_dim: 192
+use_parallel_scan: false

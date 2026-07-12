@@ -516,6 +516,7 @@ def _build_advanced_model(
             kernel_size=int(config.get("kernel_size", 5)),
             dropout=dropout,
             head_hidden_dim=int(config.get("head_hidden_dim", 256)),
+            use_parallel_scan=bool(config.get("use_parallel_scan", True)),
         )
     if model_name == "hybrid":
         return ResidualHydroHybridForecaster(
@@ -550,6 +551,7 @@ def _build_advanced_model(
             decoder_lstm_layers=int(config.get("decoder_lstm_layers", 2)),
             dropout=dropout,
             head_hidden_dim=int(config.get("head_hidden_dim", 256)),
+            use_parallel_scan=bool(config.get("use_parallel_scan", True)),
         )
     raise ValueError(f"Unsupported advanced neural model_name: {model_name!r}")
 

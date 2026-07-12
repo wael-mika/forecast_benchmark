@@ -1373,6 +1373,7 @@ class ResidualAdvancedMambaForecaster(nn.Module):
         kernel_size: int = 4,
         dropout: float = 0.1,
         head_hidden_dim: int = 256,
+        use_parallel_scan: bool = True,
     ) -> None:
         super().__init__()
         self.station_embedding = nn.Embedding(station_count, embedding_dim)
@@ -1384,7 +1385,8 @@ class ResidualAdvancedMambaForecaster(nn.Module):
         self.input_projection = nn.Linear(sequence_input_dim, model_dim)
         self.blocks = nn.ModuleList(
             [
-                _MambaBlock(model_dim, state_dim=state_dim, kernel_size=kernel_size)
+                _MambaBlock(model_dim, state_dim=state_dim, kernel_size=kernel_size,
+                            use_parallel_scan=use_parallel_scan)
                 for _ in range(int(num_blocks))
             ]
         )
@@ -1604,6 +1606,7 @@ class ResidualHydroFlowNetForecaster(nn.Module):
         decoder_lstm_layers: int = 2,
         dropout: float = 0.1,
         head_hidden_dim: int = 256,
+        use_parallel_scan: bool = True,
     ) -> None:
         super().__init__()
         self.horizon_count = int(horizon_count)
@@ -1625,7 +1628,8 @@ class ResidualHydroFlowNetForecaster(nn.Module):
         # ── Mamba encoder blocks ────────────────────────────────────────────
         self.mamba_blocks = nn.ModuleList(
             [
-                _MambaBlock(model_dim, state_dim=int(mamba_state_dim), kernel_size=4, dropout=dropout)
+                _MambaBlock(model_dim, state_dim=int(mamba_state_dim), kernel_size=4, dropout=dropout,
+                            use_parallel_scan=use_parallel_scan)
                 for _ in range(int(num_mamba_blocks))
             ]
         )
