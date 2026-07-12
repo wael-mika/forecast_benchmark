@@ -1,0 +1,24 @@
+Loading source parquets …
+
+Building master discharge frame …
+  master rows: 602,972 -> 248,139 after 30-lag/target dropna + 1984-01-01 filter
+  master split: {'train': 173689, 'validation': 37222, 'test': 37228}  stations=20
+
+Writing split boundaries …
+  saved split_boundaries.csv  (20 stations)
+
+Building flow-context …
+
+=== Window w14 (rollings [3, 7, 14]) ===
+  context: 248,139 rows x 77 cols -> context_w14_h3.parquet
+  weather: 248,139 rows x 210 cols -> weather_w14_h3.parquet
+    imputed 2,298,792 NaN hydro values with per-column train-split mean
+  hydro:   248,139 rows x 419 cols -> hydro_w14_h3.parquet
+
+=== Window w30 (rollings [3, 7, 14, 21]) ===
+  context: 248,139 rows x 109 cols -> context_w30_h3.parquet
+  weather: 248,139 rows x 361 cols -> weather_w30_h3.parquet
+    imputed 4,411,652 NaN hydro values with per-column train-split mean
+  hydro:   248,139 rows x 757 cols -> hydro_w30_h3.parquet
+
+Done. All six frames share the master index and split.

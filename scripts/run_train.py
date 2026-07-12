@@ -80,81 +80,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Constants
 # ---------------------------------------------------------------------------
 
-# All valid model x level -> YAML config mappings.
-# Absence of a key = that combination has no config (handled gracefully).
-MODEL_LEVEL_CONFIGS: dict[str, dict[str, str]] = {
-    "xgboost": {
-        "context":       "configs/xgboost_advanced_context.yaml",
-        "weather":       "configs/xgboost_advanced_weather.yaml",
-        "hydro_weather": "configs/xgboost_hydro_weather.yaml",
-    },
-    "ann": {
-        "context":       "configs/ann_advanced_context.yaml",
-        "weather":       "configs/ann_advanced_weather.yaml",
-        "hydro_weather": "configs/ann_hydro_weather.yaml",
-    },
-    "lstm": {
-        "context":       "configs/lstm_advanced_context.yaml",
-        "weather":       "configs/lstm_advanced_weather.yaml",
-        "hydro_weather": "configs/lstm_hydro_weather.yaml",
-    },
-    "nhits": {
-        "context":       "configs/nhits_advanced_context.yaml",
-        "weather":       "configs/nhits_advanced_weather.yaml",
-        "hydro_weather": "configs/nhits_hydro_weather.yaml",
-    },
-    "patchtst": {
-        "context":       "configs/patchtst_advanced_context.yaml",
-        "weather":       "configs/patchtst_advanced_weather.yaml",
-        "hydro_weather": "configs/patchtst_hydro_weather.yaml",
-    },
-    "tft": {
-        "context":       "configs/tft_advanced_context.yaml",
-        "weather":       "configs/tft_advanced_weather.yaml",
-        "hydro_weather": "configs/tft_hydro_weather.yaml",
-    },
-    "xlstm": {
-        "context":       "configs/xlstm_advanced_context.yaml",
-        "weather":       "configs/xlstm_advanced_weather.yaml",
-        "hydro_weather": "configs/xlstm_hydro_weather.yaml",
-    },
-    "mamba": {
-        "context":       "configs/mamba_advanced_context.yaml",
-        "weather":       "configs/mamba_advanced_weather.yaml",
-        "hydro_weather": "configs/mamba_hydro_weather.yaml",
-    },
-    "hybrid": {
-        # NOTE: hybrid / flownet use non-_advanced_ naming in context & weather
-        "context":       "configs/hybrid_context.yaml",
-        "weather":       "configs/hybrid_weather.yaml",
-        "hydro_weather": "configs/hybrid_hydro_weather.yaml",
-    },
-    "flownet": {
-        "context":       "configs/flownet_context.yaml",
-        "weather":       "configs/flownet_weather.yaml",
-        "hydro_weather": "configs/flownet_hydro_weather.yaml",
-    },
+# Every model x level pair maps to configs/{model}_{level}.yaml (uniform naming).
+ALL_MODELS = ["xgboost", "ann", "lstm", "bilstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"]
+ALL_LEVELS = ["context", "weather", "hydro_weather"]
+ALL_WINDOWS = ["w14", "w30"]
+
+# Level name → feature-frame stem produced by scripts/prepare_features.py.
+LEVEL_FRAME_STEM: dict[str, str] = {
+    "context": "context",
+    "weather": "weather",
+    "hydro_weather": "hydro",
 }
 
-# Data preparation: level → (script, optional_config_arg)
-DATA_PREP: dict[str, tuple[str, str | None]] = {
-    "context":       ("scripts/prepare_features_w30.py", None),    # builds both context+weather
-    "weather":       ("scripts/prepare_features_w30.py", None),    # same script, parquet cached
-    "hydro_weather": ("scripts/prepare_hydro_features.py",  None),
-}
 
-# Known output parquet paths — used to decide whether data prep can be skipped.
-DATA_PARQUETS: dict[str, str] = {
-    "context":       "data/processed/xgboost/features_context_w30_h3.parquet",
-    "weather":       "data/processed/xgboost/features_weather_plus_w30_h3.parquet",
-    "hydro_weather": "data/processed/xgboost/features_hydro_weather_w30_h3.parquet",
-}
+def _config_path(model: str, level: str) -> str:
+    return f"configs/{model}_{level}.yaml"
+
+
+def _frame_path(level: str, window: str) -> str:
+    return f"data/processed/features/{LEVEL_FRAME_STEM[level]}_{window}_h3.parquet"
+
+
+# Single data-prep script; it builds all six frames (both windows, all levels).
+DATA_PREP_SCRIPT = "scripts/prepare_features.py"
 
 # Files whose presence signals a completed training run.
 COMPLETION_SENTINELS = ("metrics_summary.csv", "training_summary.json")
-
-ALL_MODELS  = list(MODEL_LEVEL_CONFIGS)
-ALL_LEVELS  = ["context", "weather", "hydro_weather"]
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +232,21 @@ def _apply_overrides(
     """Mutate *config* in-place with all CLI overrides.  Returns (config, was_modified)."""
     modified = False
 
-    # Output directory — always redirected to runs/{run_name}/{model}_{level}/.
+    # Output directory — always redirected to runs/{run_name}/{model}_{level}_{window}/.
     # Must stay relative to PROJECT_ROOT so run_experiment.py resolves correctly.
     rel = run_dir.relative_to(PROJECT_ROOT)
     config["artifact_dir"] = str(rel).replace("\\", "/")
     modified = True
+
+    # Feature frame is resolved here from the level + window (never hardcoded in
+    # the config), so the same config serves both windows.
+    config["feature_frame_path"] = _frame_path(level, args.window)
+    modified = True
+
+    # Epoch override (used mainly for smoke runs).
+    if args.max_epochs is not None:
+        config["max_epochs"] = int(args.max_epochs)
+        modified = True
 
     # Best-checkpoint-only for neural models (0 = no intermediate checkpoints).
     # XGBoost uses checkpoint_interval differently; leave it at its YAML value.
@@ -370,6 +331,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Data levels to train on (default: all 3). "
              "Choices: context, weather, hydro_weather",
     )
+    p.add_argument(
+        "--window", metavar="WINDOW", required=True, choices=ALL_WINDOWS,
+        help="Lookback window selecting the feature frames: w14 or w30.",
+    )
+    p.add_argument(
+        "--max-epochs", type=int, default=None, metavar="INT",
+        help="Override max_epochs for every neural run (e.g. for smoke runs). "
+             "XGBoost ignores this.",
+    )
 
     # Execution control
     p.add_argument("--force", action="store_true",
@@ -441,35 +411,27 @@ def main(argv: list[str] | None = None) -> int:
     _log("=" * 70)
 
     # ------------------------------------------------------------------
-    # Step 1: Data preparation (automatic — skipped if parquet exists)
+    # Step 1: Data preparation (one script builds all six frames)
     # ------------------------------------------------------------------
     _log("\n--- Data preparation ---")
-    needed_levels = set(levels)
-    for level in ALL_LEVELS:
-        if level not in needed_levels:
-            data_prep_ok[level] = True
-            continue
-
-        parquet_path = PROJECT_ROOT / DATA_PARQUETS[level]
-        if parquet_path.exists():
-            _log(f"  data:{level}  parquet exists -> skip")
-            data_prep_ok[level] = True
-            continue
-
-        script, cfg_arg = DATA_PREP[level]
-        command = [python, script] + ([cfg_arg] if cfg_arg else [])
-        prep_label = f"data_prep:{level}"
+    needed_frames = [PROJECT_ROOT / _frame_path(level, args.window) for level in levels]
+    data_prep_ready = True
+    if all(p.exists() for p in needed_frames):
+        _log(f"  feature frames for {args.window} exist -> skip data prep")
+    else:
+        prep_label = "data_prep:features"
         ok, elapsed = _run(
-            command,
-            log_path=log_dir / f"data_prep_{level}.log",
+            [python, DATA_PREP_SCRIPT],
+            log_path=log_dir / "data_prep_features.log",
             label=prep_label,
         )
-        data_prep_ok[level] = ok
+        data_prep_ready = ok
         timings[prep_label] = elapsed
         results[prep_label] = "ok" if ok else "fail"
         if not ok:
-            _log(f"  WARNING: data prep FAILED for level '{level}'. "
-                 f"Models using this level will be skipped.")
+            _log("  WARNING: feature build FAILED. All runs will be skipped.")
+    for level in ALL_LEVELS:
+        data_prep_ok[level] = data_prep_ready
 
     # ------------------------------------------------------------------
     # Step 2: Training loop (model × level)
@@ -478,28 +440,22 @@ def main(argv: list[str] | None = None) -> int:
 
     for model in models:
         for level in levels:
-            key = f"{model}:{level}"
+            key = f"{model}:{level}:{args.window}"
 
-            # Guard 1: config exists for this combination?
-            if level not in MODEL_LEVEL_CONFIGS[model]:
-                _log(f"SKIP   {key}  (no config for this model/level combination)")
-                results[key] = "skip(no config)"
-                continue
-
-            # Guard 2: data for this level is ready?
+            # Guard 1: data for this level is ready?
             if not data_prep_ok.get(level, False):
-                _log(f"SKIP   {key}  (data prep failed for level '{level}')")
+                _log(f"SKIP   {key}  (feature build failed)")
                 results[key] = "skip(data prep failed)"
                 continue
 
-            canonical_path = PROJECT_ROOT / MODEL_LEVEL_CONFIGS[model][level]
+            canonical_path = PROJECT_ROOT / _config_path(model, level)
             if not canonical_path.exists():
                 _log(f"SKIP   {key}  (config file missing: {canonical_path})")
                 results[key] = "skip(config file missing)"
                 continue
 
             config   = yaml.safe_load(canonical_path.read_text(encoding="utf-8"))
-            run_dir  = runs_root / f"{model}_{level}"
+            run_dir  = runs_root / f"{model}_{level}_{args.window}"
             config, was_modified = _apply_overrides(config, args, model, level, run_dir)
 
             temp_path: Path | None = None
@@ -521,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Train
                 ok, elapsed = _run(
                     [python, "scripts/run_experiment.py", cfg_to_use],
-                    log_path=log_dir / f"{model}_{level}.log",
+                    log_path=log_dir / f"{model}_{level}_{args.window}.log",
                     label=key,
                     header_lines=header,
                 )
@@ -548,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
 
                         plot_ok, _ = _run(
                             plot_cmd,
-                            log_path=log_dir / f"{model}_{level}_plots.log",
+                            log_path=log_dir / f"{model}_{level}_{args.window}_plots.log",
                             label=f"{key}:plots",
                         )
                         if not plot_ok:
@@ -580,23 +536,22 @@ def main(argv: list[str] | None = None) -> int:
     fail_count = 0
     failed_keys: list[str] = []
 
-    # Print data prep results first
-    for level in ALL_LEVELS:
-        prep_key = f"data_prep:{level}"
-        if prep_key in results:
-            status  = results[prep_key]
-            icon    = "OK  " if status == "ok" else "FAIL"
-            elapsed_s = timings.get(prep_key, 0.0)
-            mm2, ss2  = divmod(int(elapsed_s), 60)
-            dur_str   = f"  ({mm2}m{ss2:02d}s)" if elapsed_s else ""
-            _log(f"  {icon}  {prep_key:40s}  {status.upper()}{dur_str}")
+    # Print data prep result first
+    prep_key = "data_prep:features"
+    if prep_key in results:
+        status  = results[prep_key]
+        icon    = "OK  " if status == "ok" else "FAIL"
+        elapsed_s = timings.get(prep_key, 0.0)
+        mm2, ss2  = divmod(int(elapsed_s), 60)
+        dur_str   = f"  ({mm2}m{ss2:02d}s)" if elapsed_s else ""
+        _log(f"  {icon}  {prep_key:40s}  {status.upper()}{dur_str}")
 
     _log("")
 
     # Print training results in model × level order
     for model in models:
         for level in levels:
-            key    = f"{model}:{level}"
+            key    = f"{model}:{level}:{args.window}"
             status = results.get(key, "not_run")
             if status.startswith("ok"):
                 icon = "OK  "; ok_count += 1

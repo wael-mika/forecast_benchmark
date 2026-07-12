@@ -1,8 +1,6 @@
 model_name: lstm
 model_variant: advanced
 enabled: true
-feature_frame_path: data/processed/xgboost/features_hydro_weather_w14_h3.parquet
-artifact_dir: artifacts/advanced_seq/lstm_hydro_weather_w14_h3
 split_column: split
 device: auto
 loss_name: trajectory
@@ -14,7 +12,7 @@ loss_horizon_weights:
 - 1.2
 - 1.45
 loss_diff_weight: 0.45
-loss_curvature_weight: 0.15
+loss_curvature_weight: 0.12
 batch_size: 512
 eval_batch_size: 1024
 max_epochs: 150
@@ -35,10 +33,11 @@ validation_eval_fraction: 1.0
 validation_eval_max_rows: 0
 test_eval_interval: 0
 embedding_dim: 16
+dropout: 0.1
+seed: 42
+artifact_dir: artifacts/lstm_hydro_weather
 model_dim: 96
 hidden_size: 128
 num_layers: 2
 kernel_size: 5
 head_hidden_dim: 256
-dropout: 0.1
-seed: 42
