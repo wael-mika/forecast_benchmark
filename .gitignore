@@ -17,6 +17,9 @@ venv/
 # Raw and heavy processed data — too large or reproducible via scripts
 data/raw/
 data/processed/xgboost/
+# Built feature frames (rebuild with scripts/prepare_features.py); the small
+# split_boundaries.csv is tracked for reference.
+data/processed/features/*.parquet
 
 # Scratch outputs
 tmp/
