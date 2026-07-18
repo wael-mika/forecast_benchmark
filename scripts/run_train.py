@@ -81,7 +81,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 
 # Every model x level pair maps to configs/{model}_{level}.yaml (uniform naming).
-ALL_MODELS = ["xgboost", "ann", "lstm", "bilstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"]
+ALL_MODELS = ["xgboost", "xgboost_scaled", "ann", "lstm", "bilstm", "nhits", "patchtst", "tft", "xlstm", "mamba", "hybrid", "flownet"]
 ALL_LEVELS = ["context", "weather", "hydro_weather"]
 ALL_WINDOWS = ["w14", "w30"]
 
@@ -249,8 +249,8 @@ def _apply_overrides(
         modified = True
 
     # Best-checkpoint-only for neural models (0 = no intermediate checkpoints).
-    # XGBoost uses checkpoint_interval differently; leave it at its YAML value.
-    if model != "xgboost":
+    # XGBoost variants use checkpoint_interval differently; leave the YAML value.
+    if not model.startswith("xgboost"):
         config["checkpoint_interval"] = 0
         modified = True
 
@@ -485,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
                 timings[key] = elapsed
 
                 # Remove intermediate best-epoch snapshots — keep only model.pt
-                if ok and model != "xgboost":
+                if ok and not model.startswith("xgboost"):
                     _cleanup_epoch_checkpoints(artifact_dir)
 
                 # Per-model plots
@@ -493,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
                     if not args.force and _is_plot_complete(artifact_dir):
                         _log(f"  plots:{key}  already complete -> skip")
                     else:
-                        if model == "xgboost":
+                        if model.startswith("xgboost"):
                             # plot_xgboost_results.py takes the artifact_dir string
                             plot_cmd = [python, "scripts/plot_xgboost_results.py",
                                         config["artifact_dir"]]

@@ -93,7 +93,10 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     training_config = {**config, "artifact_dir": str(PROJECT_ROOT / config["artifact_dir"])}
-    if model_name == "xgboost" and "horizons" in config:
+    # xgboost_scaled shares the direct-XGBoost path; its config sets
+    # target_transform: log1p_station_z and predictions are mapped back to
+    # physical units via the fitted per-station normalizer before evaluation.
+    if model_name in {"xgboost", "xgboost_scaled"} and "horizons" in config:
         experiment = train_direct_xgboost_experiment(feature_df, training_config)
         enable_categorical = "station_id_feature" in experiment.feature_columns
         prediction_columns_df = predict_direct_xgboost(
@@ -101,6 +104,7 @@ def main(argv: list[str] | None = None) -> None:
             experiment.feature_frame,
             feature_columns=experiment.feature_columns,
             enable_categorical=enable_categorical,
+            normalizer=experiment.normalizer,
         )
         prediction_df = build_direct_prediction_frame(
             experiment.feature_frame,

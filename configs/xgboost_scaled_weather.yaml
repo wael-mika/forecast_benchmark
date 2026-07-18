@@ -1,0 +1,35 @@
+model_name: xgboost_scaled
+# Train each horizon booster on per-station log1p z-scores (the neural models'
+# target space); features stay raw. Predictions are inverse-transformed back
+# to m3/s before evaluation.
+target_transform: log1p_station_z
+enabled: true
+canonical_data_path: data/processed/discharge_daily.parquet
+split_column: split
+use_station_id_as_feature: true
+horizons:
+- 1
+- 2
+- 3
+train_fraction: 0.7
+validation_fraction: 0.15
+objective: reg:squarederror
+eval_metric:
+- rmse
+- mae
+early_stopping_metric: rmse
+num_boost_round: 900
+early_stopping_rounds: 100
+checkpoint_interval: 50
+verbose_eval: 50
+tree_method: hist
+learning_rate: 0.03
+max_depth: 6
+min_child_weight: 1.5
+subsample: 0.9
+colsample_bytree: 0.8
+reg_lambda: 1.5
+reg_alpha: 0.0
+seed: 42
+verbosity: 1
+artifact_dir: artifacts/xgboost_scaled_weather
