@@ -26,3 +26,6 @@ tmp/
 
 # Build metadata
 src/*.egg-info/
+
+# GRDC-derived discharge (redistribution restricted; see README data availability)
+data/processed/discharge_daily.parquet

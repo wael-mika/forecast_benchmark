@@ -75,15 +75,17 @@ runs so suites are resumable.
 
 ## Data availability
 
-- The processed parquets used by the pipeline are the authoritative distributed
-  artifacts:
-  - `data/processed/discharge_daily.parquet`
+- The reanalysis parquets used by the pipeline are distributed with the repository:
   - `data/processed/reanalysis_daily.parquet` (ERA5 weather)
   - `data/processed/reanalysis_hydro_daily.parquet` (ERA5 / ERA5-Land hydrology)
-- Raw GRDC discharge exports are **not** redistributed (GRDC terms). Given the raw
-  daily files under `data/raw/`, `scripts/prepare_data.py` rebuilds
-  `discharge_daily.parquet` (parses the GRDC `;`-delimited daily format, converts
-  `-999.0` to NaN, reindexes onto a gap-free daily calendar).
+- GRDC discharge data are **not** redistributed (GRDC terms) — neither the raw
+  exports nor the derived `data/processed/discharge_daily.parquet`. Request the
+  daily series for the stations in `data/processed/reanalysis_station_metadata.csv`
+  from the GRDC
+  (<https://grdc.bafg.de>), place the exports under `data/raw/`, and
+  `scripts/prepare_data.py` rebuilds `discharge_daily.parquet` (parses the GRDC
+  `;`-delimited daily format, converts `-999.0` to NaN, reindexes onto a gap-free
+  daily calendar).
 - The ERA5 / ERA5-Land reanalysis parquets are assembled from Open-Meteo caches by
   the `scripts/download_*` helpers.
 - Built feature frames are git-ignored (rebuild with `scripts/prepare_features.py`);
